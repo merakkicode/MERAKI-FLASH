@@ -4,196 +4,125 @@
 
 <h1 align="center">Meraki Flash</h1>
 
-<p align="center">
-  Crie pendrives bootáveis do Windows e Linux com uma interface simples,<br>
-  moderna e segura.
-</p>
+<p align="center">Crie pendrives bootáveis do Windows e Linux, confira imagens e restaure dispositivos USB.</p>
 
 <p align="center">
   <a href="https://github.com/lindnergui/MERAKI-FLASH/releases/latest"><img src="https://img.shields.io/github/v/release/lindnergui/MERAKI-FLASH?display_name=tag&amp;sort=semver&amp;style=for-the-badge" alt="Versão mais recente"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/lindnergui/MERAKI-FLASH?style=for-the-badge" alt="Licença MIT"></a>
   <img src="https://img.shields.io/badge/plataformas-Windows%20%7C%20Linux-00bcd4?style=for-the-badge" alt="Windows e Linux">
-  <a href="https://github.com/lindnergui/MERAKI-FLASH/actions/workflows/release.yml"><img src="https://github.com/lindnergui/MERAKI-FLASH/actions/workflows/release.yml/badge.svg" alt="Status da release"></a>
+  <a href="https://github.com/lindnergui/MERAKI-FLASH/actions/workflows/release.yml"><img src="https://github.com/lindnergui/MERAKI-FLASH/actions/workflows/release.yml/badge.svg" alt="Verificação e publicação"></a>
 </p>
+
+Desenvolvido por **Guilherme Lindner**.
 
 ## Download
 
-> [!IMPORTANT]
-> Baixe o Meraki Flash somente pela página oficial de
-> [Releases do GitHub](https://github.com/lindnergui/MERAKI-FLASH/releases/latest).
-> A versão atual é a **v1.0.0**, disponível para computadores x86-64.
+Baixe a **v2.0.0** somente pelos [lançamentos oficiais](https://github.com/lindnergui/MERAKI-FLASH/releases/latest). Disponível para computadores x86-64.
 
-| Sistema | Formato | Distribuições | Download oficial |
-| --- | --- | --- | --- |
-| Linux | AppImage | Formato portátil para a maioria das distribuições | [Baixar AppImage v1.0.0](https://github.com/lindnergui/MERAKI-FLASH/releases/download/v1.0.0/Meraki.Flash_1.0.0_amd64.AppImage) |
-| Linux | RPM | Fedora, RHEL, openSUSE e derivados | [Baixar RPM v1.0.0](https://github.com/lindnergui/MERAKI-FLASH/releases/download/v1.0.0/Meraki.Flash-1.0.0-1.x86_64.rpm) |
-| Windows | EXE | Windows 10 e Windows 11 | [Baixar instalador v1.0.0](https://github.com/lindnergui/MERAKI-FLASH/releases/download/v1.0.0/Meraki.Flash_1.0.0_x64-setup.exe) |
+| Sistema | Formato | Download |
+| --- | --- | --- |
+| Linux | AppImage portátil | [AppImage v2.0.0](https://github.com/lindnergui/MERAKI-FLASH/releases/download/v2.0.0/Meraki.Flash_2.0.0_amd64.AppImage) |
+| Linux | RPM para Fedora, RHEL, openSUSE e derivados | [RPM v2.0.0](https://github.com/lindnergui/MERAKI-FLASH/releases/download/v2.0.0/Meraki.Flash-2.0.0-1.x86_64.rpm) |
+| Windows 10/11 | Instalador EXE | [Instalador v2.0.0](https://github.com/lindnergui/MERAKI-FLASH/releases/download/v2.0.0/Meraki.Flash_2.0.0_x64-setup.exe) |
 
-[Ver todas as versões e notas de lançamento](https://github.com/lindnergui/MERAKI-FLASH/releases)
+Consulte as [notas da versão](RELEASE_NOTES.md).
 
-## Instalação
+### Instalação
 
-### Linux — AppImage
-
-O AppImage não exige instalação. Depois de baixá-lo, abra um terminal na pasta
-do arquivo e conceda permissão de execução:
+No Linux, conceda permissão ao AppImage e execute-o:
 
 ```bash
 chmod +x Meraki.Flash*.AppImage
 ./Meraki.Flash*.AppImage
 ```
 
-Depois da primeira execução, também é possível abrir o arquivo com um clique
-duplo pelo gerenciador de arquivos. Para autorizar a gravação no dispositivo, o
-sistema precisa ter `pkexec` e um agente de autenticação polkit ativo na sessão
-gráfica.
+Para o RPM, use `sudo dnf install ./Meraki.Flash*.rpm` ou `sudo zypper install ./Meraki.Flash*.rpm`. A gravação exige `pkexec` e um agente de autenticação polkit ativo na sessão gráfica.
 
-### Linux — RPM
-
-No Fedora, RHEL e distribuições compatíveis, abra um terminal na pasta do
-download e execute:
-
-```bash
-sudo dnf install ./Meraki.Flash*.rpm
-```
-
-No openSUSE:
-
-```bash
-sudo zypper install ./Meraki.Flash*.rpm
-```
-
-Também é possível abrir o pacote RPM pela loja de aplicativos ou pelo
-instalador gráfico da distribuição.
-
-### Windows — EXE
-
-Baixe o arquivo `Meraki.Flash_*_x64-setup.exe`, execute-o e siga as etapas do
-instalador NSIS. Depois da instalação, abra o **Meraki Flash** pelo Menu Iniciar.
-O Windows exibirá a solicitação do UAC quando o aplicativo precisar acessar o
-pendrive para gravação.
+No Windows, execute o instalador `Meraki.Flash_*_x64-setup.exe` e abra o aplicativo pelo Menu Iniciar. O UAC solicita autorização quando uma gravação ou formatação precisa de acesso ao disco. O instalador ainda não possui assinatura digital.
 
 ## Como usar
 
-1. Escolha se a ISO contém Windows ou Linux.
-2. Selecione o arquivo `.iso`.
-3. Escolha o pendrive USB removível.
-4. Em ISOs do Windows, habilite opcionalmente as otimizações Unattended.
-5. Clique em **Gravar pendrive**, confira o dispositivo e confirme a operação.
-6. Aguarde a conclusão sem remover o pendrive.
+1. Escolha se a imagem contém Windows ou Linux.
+2. Selecione a imagem. Opcionalmente, calcule SHA-256 ou MD5 e compare com o valor fornecido pela distribuição.
+3. Escolha o dispositivo USB.
+4. Para Windows, configure as opções de instalação automatizada se desejar.
+5. Clique em **Gravar pendrive**, confira nome, capacidade e caminho do destino e confirme.
+6. Aguarde a conclusão. Para interromper, use **Cancelar gravação** e espere a liberação do dispositivo.
 
 > [!CAUTION]
-> A gravação apaga todos os dados do dispositivo selecionado. Confirme o nome,
-> a capacidade e o caminho do pendrive antes de continuar.
+> Gravar ou restaurar um dispositivo apaga seus dados e partições. Confira o destino antes da confirmação. Uma operação cancelada pode deixar o dispositivo sem condições de inicialização; grave ou formate novamente antes de usá-lo.
 
-## Principais recursos
+## Recursos da versão 2.0.0
 
-- gravação bit a bit de ISOs Linux híbridas;
-- preparação de mídias Windows compatíveis com UEFI usando MBR e FAT32;
-- divisão automática de `sources/install.wim` maior que 4 GiB em arquivos SWM;
-- geração opcional de `autounattend.xml` para instalações Windows otimizadas;
-- detecção restrita a dispositivos USB removíveis;
-- revalidação do hardware antes de qualquer escrita destrutiva;
-- progresso em tempo real com porcentagem, velocidade e tempo estimado;
-- aviso opcional de novas versões ao abrir, sem instalação automática;
-- releitura e comparação dos dados após gravar uma ISO Linux;
-- interface nativa multiplataforma construída com Tauri 2.
+- Reconhecimento de pendrives e SSDs externos USB que reportam mídia fixa, preservando a exclusão de discos de sistema.
+- Gravação Linux de `.iso`, `.img`, `.raw` e `.bin`, além de descompressão em streaming de `.gz`, `.xz` e `.zip`.
+- Preparação Windows com MBR e FAT32 para UEFI, incluindo conversão de `install.esd` grande e divisão de WIM em arquivos SWM.
+- Instalação Windows automatizada com opções de conta local, privacidade, BitLocker automático, instalação sem internet e nome do computador.
+- Cancelamento cooperativo com sincronização e liberação dos recursos.
+- Cálculo de SHA-256/MD5, progresso, cancelamento e comparação com hashes oficiais.
+- Restauração de USB para uma partição FAT32 com rótulo personalizado, sem exigir uma imagem.
+- Progresso em tempo real, verificação após gravação Linux e aviso opcional de novas versões.
 
-## Segurança da gravação
+## Formatos e motores
 
-O fluxo de gravação aplica as seguintes proteções:
+### Linux e imagens raw
 
-1. a descoberta aceita apenas discos físicos USB marcados como removíveis e
-   exclui o disco que contém o sistema;
-2. a confirmação mostra nome, capacidade e caminho bruto do destino;
-3. o helper elevado redescobre o dispositivo e compara caminho, capacidade e
-   serial antes de abrir o disco;
-4. a ISO é validada antes e depois da elevação e não pode estar armazenada no
-   próprio destino;
-5. no Linux, os volumes são desmontados antes da primeira escrita; no Windows,
-   são bloqueados e desmontados com `DeviceIoControl`;
-6. somente o helper iniciado por `pkexec` no Linux ou UAC `runas` no Windows
-   abre o dispositivo bruto para escrita;
-7. a operação sincroniza o dispositivo ao final e transmite fase, porcentagem,
-   velocidade e tempo restante para a interface.
+As imagens são gravadas bit a bit em blocos de até 4 MiB. O cabeçalho inicial do conteúdo descompactado é validado antes da escrita. Os formatos GZ, XZ e ZIP são lidos em streaming, sem extrair a imagem inteira para o SSD do computador. O ZIP deve conter uma imagem compatível; arquivos adicionais não são extraídos para o disco do computador.
 
-## Motor de gravação
+O tamanho é conferido quando disponível, e a escrita nunca pode ultrapassar a capacidade do destino. A verificação reabre a origem, inclusive o descompressor, e compara o conteúdo com os bytes gravados. Imagens comprimidas corrompidas ou truncadas são rejeitadas.
 
-### ISOs Linux
+### Windows e UEFI
 
-Imagens Linux são gravadas bit a bit no dispositivo bruto em blocos de 4 MiB,
-preservando a tabela de partições e o conteúdo da ISO híbrida.
+O modo Windows exige `.iso` ou `.img` não compactado com estrutura ISO9660/UDF apropriada e arquivos de inicialização UEFI. Não depende de executáveis como DISM, `diskpart` ou `mkfs`.
 
-### ISOs Windows e UEFI
+Quando `sources/install.wim` excede o limite FAT32, o aplicativo o divide em `install.swm`, `install2.swm` e partes subsequentes. Para `install.esd` grande, exporta todos os índices para um WIM intermediário não sólido e depois o divide. O conjunto SWM substitui o arquivo original em `sources/`.
 
-O fluxo Windows não depende de `dd`, `mount`, `mkfs`, DISM ou outro executável
-externo do sistema operacional:
+No Windows, a conversão usa a WIMGAPI do sistema; no Linux, a wimlib incluída no aplicativo. A preparação verifica espaço temporário para a origem, o intermediário, as partes finais e uma margem. Arquivos temporários são removidos ao concluir, cancelar ou falhar. A preparação das partes ocorre antes de alterar o USB.
 
-1. lê UDF e usa ISO9660 como fallback, validando intervalos físicos, nomes
-   compatíveis com FAT32 e a presença de `EFI/BOOT/boot*.efi`;
-2. se `sources/install.wim` exceder 4 GiB, extrai e divide o WIM em
-   `install.swm`, `install2.swm` e partes subsequentes antes de tocar no USB;
-3. no Linux, o split usa a `libwim` 1.14.4 compilada junto do aplicativo; no
-   Windows, usa `WIMCreateFile` e `WIMSplitFile` da `wimgapi.dll` do `System32`;
-4. revalida a identidade física do pendrive, desmonta ou bloqueia seus volumes
-   e limpa assinaturas de partição antigas;
-5. cria uma tabela MBR com uma partição FAT32 LBA ativa, alinhada em 1 MiB, e a
-   formata com clusters de 32 KiB;
-6. extrai a árvore da ISO diretamente para o FAT32, substituindo somente o WIM
-   grande pelos SWMs validados;
-7. quando solicitado, grava o `autounattend.xml` validado na raiz do FAT32 e
-   sincroniza o dispositivo ao final.
+O destino recebe MBR e FAT32, com alinhamento de 1 MiB e tamanho de cluster escolhido conforme a geometria. Outros arquivos individuais maiores que 4 GiB menos 1 byte continuam incompatíveis com FAT32. O limite conservador de dispositivo é 2 TiB.
 
-As limitações intencionais atuais são dispositivos de até 2 TiB e a rejeição
-de `install.esd` maior que 4 GiB, pois um ESD sólido não pode ser dividido com
-a mesma segurança. ISOs que já contêm `install.swm` são aceitas.
+### Instalação automatizada
 
-Para dividir um WIM, o computador precisa ter espaço temporário equivalente a
-aproximadamente duas vezes o tamanho de `install.wim`, mais uma margem de
-segurança. O Meraki Flash verifica esse espaço antes da extração. No Linux, ele
-prefere `/var/tmp` para evitar o `tmpfs` normalmente usado em `/tmp`, e depois
-tenta o diretório temporário do sistema e a pasta da ISO.
+As opções de `autounattend.xml` incluem:
 
-### Otimizações Unattended
+- ignorar verificações de TPM, Secure Boot e RAM;
+- criar conta local e reduzir perguntas de privacidade;
+- desativar o Edge em segundo plano, ocultar a pesquisa e remover pacotes conhecidos do Copilot;
+- impedir a criptografia automática do dispositivo;
+- configurar BypassNRO para instalação sem internet;
+- definir nome de computador válido de até 15 caracteres.
 
-Para Windows 10 e 11 x64, a interface pode gerar um `autounattend.xml` com as
-seguintes opções:
+As opções para impedir criptografia automática e permitir instalação sem internet começam ativadas quando o painel de instalação automatizada é usado. A aplicação dessas configurações depende da edição e versão do instalador Windows; mudanças futuras da Microsoft podem afetar os mecanismos de OOBE. A conta local criada não tem senha inicial: defina uma senha segura no primeiro acesso.
 
-- ignorar verificações de TPM 2.0, Secure Boot e RAM;
-- criar uma conta local offline;
-- reduzir as perguntas de privacidade e telemetria;
-- desativar o Edge em segundo plano;
-- ocultar a pesquisa da barra de tarefas;
-- remover pacotes conhecidos do Copilot.
+O XML é validado no frontend e no helper, limitado a 16 KiB e rejeitado se contiver DTD/DOCTYPE ou estrutura inválida.
 
-O frontend valida e escapa os valores informados. O processo principal envia o
-XML opcional ao helper elevado, que revalida tamanho e estrutura, rejeita
-DTD/DOCTYPE e permite o recurso apenas no fluxo Windows. A conta local é criada
-como Administrador sem senha inicial; defina uma senha segura no primeiro
-acesso.
+### Hash e integridade
+
+A Etapa 02 calcula SHA-256 ou MD5 em segundo plano. É possível colar apenas o hash ou uma linha de `SHA256SUMS`, `sha256sum` ou formato BSD. A comparação ignora diferenças de maiúsculas/minúsculas. Trocar a imagem cancela o cálculo anterior e limpa o resultado.
+
+Use hashes obtidos no site oficial por uma conexão confiável. A coincidência comprova que os bytes correspondem ao hash informado; por si só, não comprova a origem desse hash. Prefira SHA-256; MD5 está disponível para compatibilidade com verificações legadas.
+
+### Restaurar / Formatar pendrive
+
+Na Etapa 03, selecione um USB e abra **Restaurar / Formatar pendrive**. Confira o destino e informe um rótulo de 1 a 11 letras ASCII ou números. O padrão é `PENDRIVE`.
+
+A restauração limpa os primeiros e os últimos 2 MiB, cria uma partição MBR ativa do tipo FAT32 LBA e formata sua capacidade disponível. São reservados 1 MiB em cada extremidade para alinhamento, além dos metadados FAT32. Ao finalizar, o aplicativo sincroniza, libera os volumes e solicita a releitura da tabela ao sistema operacional.
+
+É uma formatação rápida, não um apagamento seguro de todos os dados. FAT32 aceita arquivos de até 4 GiB menos 1 byte. O cancelamento é cooperativo e aguarda operações de I/O já pendentes.
+
+## Proteções
+
+A descoberta aceita discos físicos USB, independentemente do bit removível. Discos internos e de sistema/boot são excluídos. No Linux, a análise percorre os volumes descendentes e rejeita montagens críticas e swap; no Windows, verifica os indicadores de sistema/boot e a unidade do sistema. Metadados insuficientes são tratados de forma restritiva.
+
+O helper elevado redescobre o hardware e compara sua identidade antes de abrir o destino. Dispositivos somente-leitura e imagens armazenadas no próprio destino são rejeitados. Os volumes são desmontados no Linux e bloqueados/desmontados no Windows. O canal local de progresso e controle é autenticado; sua desconexão solicita cancelamento.
+
+A sincronização e a liberação de recursos precedem a notificação terminal à interface. Falhas de sincronização ou atualização de partições são apresentadas ao usuário.
 
 ## Desenvolvimento
 
-O projeto usa Tauri 2, Rust, React, TypeScript e Tailwind CSS 4.
+O projeto usa Tauri 2, Rust, React 19, TypeScript e Tailwind CSS 4.
 
-### Pré-requisitos de compilação
-
-- Node.js 20 ou mais recente;
-- Rust 1.95 ou mais recente;
-- dependências nativas do Tauri para Windows ou Linux;
-- no Linux, compilador C, `make`, Autotools e `libclang` para compilar a
-  biblioteca WIM incluída no projeto.
-
-No Fedora, instale os pacotes necessários:
-
-```bash
-sudo dnf install webkit2gtk4.1-devel openssl-devel curl wget file \
-  libappindicator-gtk3-devel librsvg2-devel libxdo-devel clang-devel \
-  autoconf automake libtool make
-sudo dnf group install "c-development"
-```
-
-Em seguida:
+Requer Node.js 22, Rust 1.95 ou mais recente e as dependências nativas do Tauri. No Linux, também são necessários compilador C, `make`, Autotools e `libclang` para compilar a wimlib incluída.
 
 ```bash
 git clone https://github.com/lindnergui/MERAKI-FLASH.git
@@ -202,92 +131,37 @@ npm ci
 npm run tauri dev
 ```
 
-### Estrutura do projeto
-
-```text
-src/                         Interface React
-  App.tsx                    Fluxo visual em quatro etapas
-  components/UnattendPanel.tsx
-                             Configurador visual da instalação automática
-  lib/unattend.ts            Validação e template do autounattend.xml
-  styles.css                 Design system Meraki/Tailwind
-src-tauri/
-  src/lib.rs                 Bootstrap e registro dos comandos Tauri
-  src/commands/usb.rs        Ponte entre o Tauri e o domínio
-  src/commands/flash.rs      Comando que inicia a gravação
-  src/flash/                 Helper elevado e motores Linux/Windows
-    windows_iso.rs           ISO/UDF, MBR, FAT32, extração e validações
-    wim.rs                   Split WIM: wimlib no Linux e WIMGAPI no Windows
-  src/elevation.rs           Integração com pkexec e UAC/runas
-  crates/meraki-flash-core/  Descoberta testável de volumes removíveis
-  crates/wimlib-sys/         Binding e fonte da wimlib para Linux
-  Cargo.toml                 Dependências Rust multiplataforma
-  capabilities/default.json Permissões mínimas da janela
-```
-
-No Linux, a `libwim` incluída é compilada sem `ntfs-3g`, sob a opção LGPL-3.0+
-oferecida pelo projeto upstream. Antes de redistribuir binários modificados,
-revise as obrigações da LGPL e o aviso do binding em
-`src-tauri/crates/wimlib-sys`.
-
-### Testes
+### Testes e compilação
 
 ```bash
 npm test
+npm run build
 cargo test --locked --workspace --manifest-path src-tauri/Cargo.toml
 cargo clippy --locked --workspace --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
-npm run build
 ```
 
-Os testes automatizados gravam somente em arquivos temporários, incluindo uma
-imagem esparsa de 3 GiB usada para validar MBR e FAT32. Nunca use um disco real
-como alvo de teste sem uma bancada dedicada e dados descartáveis.
+Os testes usam arquivos temporários e imagens sintéticas para validar MBR/FAT32, streaming, conversão ESD, cancelamento, hashes e filtros de dispositivos. Não escrevem em USB físico. Testes de inicialização e compatibilidade com hardware exigem uma bancada dedicada com dados descartáveis.
 
-## Lançamentos e CI/CD
+### Organização
 
-O workflow [`.github/workflows/release.yml`](.github/workflows/release.yml) é
-acionado quando uma tag SemVer correspondente à versão de
-`src-tauri/tauri.conf.json` é enviada ao GitHub.
+| Local | Responsabilidade |
+| --- | --- |
+| `src/App.tsx` | Fluxo da interface, progresso e cancelamento |
+| `src/components/` | Painéis de instalação, hash e restauração |
+| `src/lib/` | Validações e estado da interface |
+| `src-tauri/src/commands/` | Comandos Tauri de USB, gravação, formatação e hash |
+| `src-tauri/src/flash/` | Helper, streaming, ISO/UDF, WIM/ESD e FAT32 |
+| `src-tauri/crates/meraki-flash-core/` | Descoberta segura e validação de imagens |
+| `src-tauri/crates/wimlib-sys/` | Binding e fonte da wimlib para Linux |
 
-Cada lançamento executa dois builds independentes:
+### Lançamentos
 
-- **Ubuntu 22.04:** gera AppImage e RPM;
-- **Windows Runner:** gera o instalador EXE com NSIS.
+O workflow [release.yml](.github/workflows/release.yml) testa Windows e Linux. Tags no formato `vX.Y.Z` devem corresponder à versão dos manifestos. A publicação exige testes, Clippy e os três instaladores: EXE, AppImage e RPM. A release permanece em rascunho enquanto os builds não terminam com sucesso.
 
-Cada build executa os testes e o Clippy antes de gerar instaladores. A release
-fica em rascunho até ambos os sistemas passarem e os três artefatos estarem
-anexados; só então é publicada automaticamente. A release estável atual usa a tag `v1.0.0`. Para
-publicar a próxima correção, depois de atualizar a versão do projeto para
-`1.0.1`, por exemplo:
-
-```bash
-git tag -a v1.0.1 -m "Meraki Flash v1.0.1"
-git push origin v1.0.1
-```
-
-O instalador Windows ainda não possui assinatura digital. Para distribuição em
-larga escala, configure um certificado de assinatura de código no pipeline.
+O aviso opcional de atualizações consulta a última release estável ao abrir, sem baixar nem instalar automaticamente. Pode ser desativado na interface. Usuários da v0.1.0 precisam instalar uma versão recente manualmente para obter esse aviso.
 
 ## Licença
 
-Distribuído sob a licença MIT. Consulte o arquivo [LICENSE](LICENSE).
+Copyright © 2026 Guilherme Lindner. Distribuído sob a [licença MIT](LICENSE).
 
-## Avisos de atualização
-
-A partir da v1.0.0, ao abrir o aplicativo ele consulta a última release estável
-pública no GitHub, com limite de cinco segundos. O aviso pode ser fechado em
-**Agora não** e a consulta pode ser desativada em **Avisar sobre novas versões ao
-abrir**. A preferência fica salva neste computador. Não há download ou instalação
-automática, e falhas de rede não interrompem o uso.
-
-A v0.1.0 já distribuída não contém esse recurso: seus usuários precisam instalar
-a v1.0.0 manualmente uma vez para receber avisos de lançamentos futuros.
-
-### Regressão visual opcional
-
-Com `npm run preview -- --port 1420` em execução, instale `playwright` sem salvar
-no manifesto (`npm install --no-save playwright`), instale seu Chromium no Linux
-(`npx playwright install chromium`) e execute `node tests/interface.mjs`. No
-Windows o teste usa o Edge instalado. A simulação não chama o motor nativo nem
-acessa discos físicos. Ela cobre quatro larguras de janela, etapas, autorização,
-erros, bloqueios e a preferência de atualização. A captura fica em `.qa/`.
+No Linux, a wimlib incluída é compilada sem `ntfs-3g`, sob a opção LGPL-3.0+ oferecida pelo projeto upstream. Ao redistribuir binários modificados, observe as obrigações da LGPL e o aviso do binding em `src-tauri/crates/wimlib-sys`.

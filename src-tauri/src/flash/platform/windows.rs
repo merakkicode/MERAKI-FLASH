@@ -20,6 +20,37 @@ pub struct PreparedDevice {
     _volume_locks: Vec<File>,
 }
 
+impl PreparedDevice {
+    pub fn release_and_refresh(self) -> Result<(), String> {
+        let Self {
+            file,
+            _volume_locks: locks,
+        } = self;
+        drop(locks);
+        let mut returned = 0u32;
+        // SAFETY: handle válido; este IOCTL não usa buffers de entrada/saída.
+        let success = unsafe {
+            DeviceIoControl(
+                file.as_raw_handle(),
+                windows_sys::Win32::System::Ioctl::IOCTL_DISK_UPDATE_PROPERTIES,
+                ptr::null(),
+                0,
+                ptr::null_mut(),
+                0,
+                &mut returned,
+                ptr::null_mut(),
+            )
+        };
+        if success == 0 {
+            return Err(format!(
+                "o FAT32 foi gravado, mas o Windows não conseguiu atualizar as partições: {}. Reconecte o pendrive para atualizar a lista",
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(())
+    }
+}
+
 pub fn is_elevated() -> bool {
     // SAFETY: IsUserAnAdmin não recebe ponteiros e apenas consulta o token atual.
     unsafe { IsUserAnAdmin() != 0 }

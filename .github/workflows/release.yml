@@ -9,7 +9,7 @@ run-name: >-
 on:
   workflow_dispatch:
   push:
-    branches: [main, "codex/**"]
+    branches: [main]
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+"
 

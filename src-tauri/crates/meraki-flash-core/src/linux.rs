@@ -67,8 +67,9 @@ fn devices_from_lsblk(parsed: LsblkOutput) -> Vec<UsbDevice> {
         .blockdevices
         .into_iter()
         .filter(|device| device.kind == "disk")
-        // Exclui cartões, discos internos e SSDs externos não removíveis.
-        .filter(|device| device.rm && device.tran.as_deref() == Some("usb"))
+        // O transporte identifica USB; RM só descreve a mídia, não o barramento.
+        .filter(|device| device.tran.as_deref() == Some("usb"))
+        .filter(|device| device.size > 0)
         .filter(|device| !contains_system_mount(device))
         .map(|device| to_usb_device(device, &mount_info))
         .collect::<Vec<_>>();
@@ -111,19 +112,25 @@ fn to_usb_device(device: LsblkDevice, mount_info: &HashMap<String, MountInfo>) -
         available_bytes: first_info.map_or(0, |info| info.available_bytes),
         // ISO9660 montado como somente leitura não torna o hardware protegido.
         read_only: device.ro,
-        kind: "Removable".to_owned(),
+        kind: if device.rm { "Removable" } else { "Fixed USB" }.to_owned(),
         transport: "USB".to_owned(),
         serial,
     }
 }
 
 fn contains_system_mount(device: &LsblkDevice) -> bool {
-    device
-        .mountpoints
-        .iter()
-        .flatten()
-        .any(|mount| matches!(mount.as_str(), "/" | "/boot" | "/boot/efi" | "/usr" | "/var" | "/home" | "[SWAP]"))
-        || device.children.iter().any(contains_system_mount)
+    device.mountpoints.iter().flatten().any(|mount| {
+        // Inclui montagens separadas como /var/lib e /home/usuario,
+        // sem confundir /home com /home-backup, por exemplo.
+        mount == "/"
+            || mount == "[SWAP]"
+            || ["/boot", "/usr", "/var", "/home"].iter().any(|root| {
+                mount == root
+                    || mount
+                        .strip_prefix(root)
+                        .is_some_and(|rest| rest.starts_with('/'))
+            })
+    }) || device.children.iter().any(contains_system_mount)
 }
 
 fn collect_mount_points(device: &LsblkDevice, output: &mut Vec<String>) {
@@ -172,7 +179,14 @@ mod tests {
 
     #[test]
     fn blocks_separate_system_partitions_and_keeps_rewritable_iso_media() {
-        for mount in ["/", "/boot", "/boot/efi", "/home", "[SWAP]", "/run/media/user/LIVE"] {
+        for mount in [
+            "/",
+            "/boot",
+            "/boot/efi",
+            "/home",
+            "[SWAP]",
+            "/run/media/user/LIVE",
+        ] {
             let json = serde_json::json!({"blockdevices": [{
                 "path":"/dev/sdb", "name":"USB", "type":"disk", "tran":"usb",
                 "rm":true, "size":16000000000u64, "ro":false, "model":"USB",
@@ -183,12 +197,14 @@ mod tests {
             if mount == "/run/media/user/LIVE" {
                 assert_eq!(devices.len(), 1);
                 assert!(!devices[0].read_only);
-            } else { assert!(devices.is_empty(), "{mount}"); }
+            } else {
+                assert!(devices.is_empty(), "{mount}");
+            }
         }
     }
 
     #[test]
-    fn keeps_only_removable_usb_and_rejects_system_disk() {
+    fn keeps_removable_and_fixed_usb_and_rejects_system_disk() {
         let json = r#"{
           "blockdevices": [
             {"path":"/dev/nvme0n1","name":"/dev/nvme0n1","type":"disk","tran":"nvme","rm":false,"size":512000,"ro":false,"model":"Internal","serial":"A","fstype":null,"mountpoints":[],"children":[
@@ -203,8 +219,106 @@ mod tests {
         let parsed: LsblkOutput = serde_json::from_str(json).unwrap();
         let devices = devices_from_lsblk(parsed);
 
-        assert_eq!(devices.len(), 1);
-        assert_eq!(devices[0].device_path, "/dev/sdb");
-        assert_eq!(devices[0].mount_points, ["/run/media/test/USB"]);
+        assert_eq!(devices.len(), 2);
+        assert_eq!(devices[0].device_path, "/dev/sdc");
+        assert_eq!(devices[0].name, "External SSD");
+        assert_eq!(devices[0].kind, "Fixed USB");
+        assert_eq!(devices[1].device_path, "/dev/sdb");
+        assert_eq!(devices[1].kind, "Removable");
+        assert_eq!(devices[1].mount_points, ["/run/media/test/USB"]);
+    }
+
+    fn usb_fixture(rm: bool) -> serde_json::Value {
+        serde_json::json!({
+            "path": "/dev/sdb", "name": "USB", "type": "disk", "tran": "usb",
+            "rm": rm, "size": 16000000000u64, "ro": false, "model": "USB",
+            "serial": "1", "fstype": null, "mountpoints": [null]
+        })
+    }
+
+    #[test]
+    fn rejects_system_mounts_at_every_depth_for_removable_and_fixed_usb() {
+        for rm in [false, true] {
+            for mount in [
+                "/",
+                "/boot",
+                "/boot/efi",
+                "/usr",
+                "/var",
+                "/home",
+                "[SWAP]",
+                "/boot/",
+                "/usr/local",
+                "/var/lib",
+                "/home/user",
+            ] {
+                for depth in 0..3 {
+                    let mut device = usb_fixture(rm);
+                    device["mountpoints"] = serde_json::json!([null, "/media/data", mount]);
+                    for _ in 0..depth {
+                        device["type"] = serde_json::json!("part");
+                        let mut parent = usb_fixture(rm);
+                        parent["children"] = serde_json::json!([device]);
+                        device = parent;
+                    }
+                    let parsed = serde_json::from_value(serde_json::json!({
+                        "blockdevices": [device]
+                    }))
+                    .unwrap();
+                    assert!(
+                        devices_from_lsblk(parsed).is_empty(),
+                        "rm={rm}, {mount}, depth={depth}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_non_usb_non_disk_and_empty_devices() {
+        for rm in [false, true] {
+            for (field, value) in [
+                ("tran", serde_json::json!("nvme")),
+                ("tran", serde_json::json!("sata")),
+                ("tran", serde_json::Value::Null),
+                ("type", serde_json::json!("part")),
+                ("type", serde_json::json!("loop")),
+                ("size", serde_json::json!(0)),
+            ] {
+                let mut device = usb_fixture(rm);
+                device[field] = value;
+                let parsed = serde_json::from_value(serde_json::json!({
+                    "blockdevices": [device]
+                }))
+                .unwrap();
+                assert!(devices_from_lsblk(parsed).is_empty(), "rm={rm}, {field}");
+            }
+        }
+    }
+
+    #[test]
+    fn allows_data_mounts_without_confusing_system_path_prefixes() {
+        for rm in [false, true] {
+            for mount in [
+                "/media/USB",
+                "/mnt/backup",
+                "/home-backup",
+                "/various",
+                "/bootable",
+                "/usr-data",
+            ] {
+                let mut device = usb_fixture(rm);
+                device["mountpoints"] = serde_json::json!([mount]);
+                device["ro"] = serde_json::json!(true);
+                let parsed = serde_json::from_value(serde_json::json!({
+                    "blockdevices": [device]
+                }))
+                .unwrap();
+                let devices = devices_from_lsblk(parsed);
+                assert_eq!(devices.len(), 1, "{mount}");
+                assert!(devices[0].read_only);
+                assert_eq!(devices[0].kind, if rm { "Removable" } else { "Fixed USB" });
+            }
+        }
     }
 }

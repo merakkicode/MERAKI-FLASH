@@ -9,6 +9,21 @@ pub struct StartFlashRequest {
     pub unattend_xml_content: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartFormatRequest {
+    pub device_id: String,
+    pub volume_label: Option<String>,
+}
+
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum OperationKind {
+    #[default]
+    Flash,
+    Format,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ImageKind {
@@ -25,6 +40,10 @@ pub struct StartFlashResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ElevatedFlashRequest {
+    #[serde(default)]
+    pub operation_kind: OperationKind,
+    #[serde(default)]
+    pub volume_label: Option<String>,
     pub operation_id: String,
     pub token: String,
     pub callback_port: u16,
@@ -51,6 +70,27 @@ pub enum FlashPhase {
     Verifying,
     Done,
     Error,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClientControlMessage {
+    pub token: String,
+    pub action: ControlAction,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ControlAction {
+    Start,
+    Cancel,
+}
+
+impl FlashPhase {
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Done | Self::Error | Self::Cancelled)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

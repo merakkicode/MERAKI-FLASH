@@ -11,6 +11,19 @@ pub struct PreparedDevice {
     pub file: File,
 }
 
+impl PreparedDevice {
+    pub fn release_and_refresh(self) -> Result<(), String> {
+        // SAFETY: BLKRRPART não recebe buffer e o descritor permanece válido.
+        if unsafe { libc::ioctl(self.file.as_raw_fd(), libc::_IO(0x12, 95)) } != 0 {
+            return Err(format!(
+                "o FAT32 foi gravado, mas o Linux não conseguiu reler as partições: {}. Reconecte o pendrive para atualizar a lista",
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(())
+    }
+}
+
 pub fn is_elevated() -> bool {
     Uid::effective().is_root()
 }

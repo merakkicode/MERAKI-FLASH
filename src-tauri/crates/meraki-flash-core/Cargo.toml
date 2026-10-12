@@ -1,6 +1,6 @@
 [package]
 name = "meraki-flash-core"
-version = "1.0.0"
+version = "2.0.0"
 description = "Domínio e descoberta segura de dispositivos do Meraki Flash."
 edition = "2024"
 rust-version = "1.95"
@@ -10,3 +10,7 @@ serde.workspace = true
 serde_json.workspace = true
 sysinfo.workspace = true
 thiserror.workspace = true
+zip.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

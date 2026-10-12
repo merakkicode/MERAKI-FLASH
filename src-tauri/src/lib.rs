@@ -6,10 +6,15 @@ mod flash;
 pub fn run() {
     tauri::Builder::default()
         .manage(flash::FlashManager::default())
+        .manage(commands::hash::HashManager::default())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             commands::usb::list_usb_devices,
             commands::flash::start_flash,
+            commands::flash::start_format_device,
+            commands::flash::cancel_flash,
+            commands::hash::compute_image_hash,
+            commands::hash::cancel_hash,
             commands::updates::open_releases_page
         ])
         .run(tauri::generate_context!())

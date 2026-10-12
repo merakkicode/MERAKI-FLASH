@@ -6,6 +6,10 @@ export interface UnattendOptions {
   disableEdgeBackground: boolean;
   hideTaskbarSearch: boolean;
   removeCopilot: boolean;
+  disableBitLocker: boolean;
+  bypassNetworkRequirement: boolean;
+  setComputerName: boolean;
+  computerName: string;
 }
 
 export const DEFAULT_UNATTEND_OPTIONS: UnattendOptions = {
@@ -16,6 +20,10 @@ export const DEFAULT_UNATTEND_OPTIONS: UnattendOptions = {
   disableEdgeBackground: false,
   hideTaskbarSearch: true,
   removeCopilot: false,
+  disableBitLocker: true,
+  bypassNetworkRequirement: true,
+  setComputerName: false,
+  computerName: "",
 };
 
 const RESERVED_WINDOWS_NAMES = new Set([
@@ -45,6 +53,22 @@ export function validateWindowsUsername(value: string): string | null {
   return null;
 }
 
+export function validateComputerName(value: string): string | null {
+  const computerName = value.trim();
+  if (!computerName) return "Informe o nome do computador.";
+  if (computerName.length > 15) return "Use no máximo 15 caracteres no nome do computador.";
+  if (!/^[a-zA-Z0-9-]+$/.test(computerName)) {
+    return "Use apenas letras sem acentos, números e hífens, sem espaços.";
+  }
+  if (computerName.startsWith("-") || computerName.endsWith("-")) {
+    return "O nome do computador não pode começar nem terminar com hífen.";
+  }
+  if (/^[0-9]+$/.test(computerName)) {
+    return "O nome do computador não pode conter apenas números.";
+  }
+  return null;
+}
+
 export function validateUnattendOptions(options: UnattendOptions): string | null {
   const hasSelection =
     options.bypassWindows11Requirements ||
@@ -52,10 +76,15 @@ export function validateUnattendOptions(options: UnattendOptions): string | null
     options.skipPrivacyQuestions ||
     options.disableEdgeBackground ||
     options.hideTaskbarSearch ||
-    options.removeCopilot;
+    options.removeCopilot ||
+    options.disableBitLocker ||
+    options.bypassNetworkRequirement ||
+    options.setComputerName;
 
   if (!hasSelection) return "Selecione ao menos uma otimização.";
-  return options.createLocalAccount ? validateWindowsUsername(options.username) : null;
+  const usernameError = options.createLocalAccount ? validateWindowsUsername(options.username) : null;
+  if (usernameError) return usernameError;
+  return options.setComputerName ? validateComputerName(options.computerName) : null;
 }
 
 export function generateAutounattendXml(options: UnattendOptions): string {
@@ -65,6 +94,21 @@ export function generateAutounattendXml(options: UnattendOptions): string {
   const windowsPeCommands: string[] = [];
   const specializeCommands: string[] = [];
   const firstLogonCommands: string[] = [];
+
+  if (options.disableBitLocker) {
+    specializeCommands.push(
+      "reg.exe add HKLM\\SYSTEM\\CurrentControlSet\\Control\\BitLocker /v PreventDeviceEncryption /t REG_DWORD /d 1 /f",
+    );
+  }
+
+  if (options.bypassNetworkRequirement) {
+    windowsPeCommands.push(
+      "reg.exe add HKLM\\SYSTEM\\Setup\\LabConfig /v BypassNRO /t REG_DWORD /d 1 /f",
+    );
+    specializeCommands.push(
+      "reg.exe add HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\OOBE /v BypassNRO /t REG_DWORD /d 1 /f",
+    );
+  }
 
   if (options.bypassWindows11Requirements) {
     windowsPeCommands.push(
@@ -119,16 +163,25 @@ export function generateAutounattendXml(options: UnattendOptions): string {
       ),
     );
   }
+  const specializeComponents: string[] = [];
   if (specializeCommands.length) {
-    settings.push(
-      renderSettings(
-        "specialize",
-        renderComponent(
-          "Microsoft-Windows-Deployment",
-          renderRunSynchronous(specializeCommands),
-        ),
+    specializeComponents.push(
+      renderComponent(
+        "Microsoft-Windows-Deployment",
+        renderRunSynchronous(specializeCommands),
       ),
     );
+  }
+  if (options.setComputerName) {
+    specializeComponents.push(
+      renderComponent(
+        "Microsoft-Windows-Shell-Setup",
+        `      <ComputerName>${escapeXml(options.computerName.trim())}</ComputerName>`,
+      ),
+    );
+  }
+  if (specializeComponents.length) {
+    settings.push(renderSettings("specialize", specializeComponents.join("\n")));
   }
 
   const shellSetup: string[] = [];

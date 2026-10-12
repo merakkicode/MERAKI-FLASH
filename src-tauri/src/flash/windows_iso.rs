@@ -1,11 +1,16 @@
 use super::Reporter;
-use super::sector_io::SectorIo;
+use super::cancellation::{CancellableIo, finish_io};
+#[cfg(test)]
+use super::disk_layout::format_fat32;
+use super::disk_layout::{ALIGNMENT_BYTES, create_partition_table, format_fat32_cancellable};
 use super::platform;
 use super::protocol::{FlashPhase, FlashProgress};
-use fatfs::{FatType, FileSystem, FormatVolumeOptions, FsOptions, ReadWriteSeek};
+use super::sector_io::SectorIo;
+use fatfs::{FileSystem, FsOptions, ReadWriteSeek};
 use fscommon::{BufStream, StreamSlice};
 use isomage::{TreeNode, cat_node};
-use mbrman::{BOOT_ACTIVE, CHS, MBR, MBRPartitionEntry};
+#[cfg(test)]
+use mbrman::{BOOT_ACTIVE, MBR};
 use meraki_flash_core::UsbDevice;
 use quick_xml::Reader;
 use quick_xml::events::Event;
@@ -16,10 +21,7 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 use tempfile::{Builder, TempDir};
-use uuid::Uuid;
 
-const ALIGNMENT_BYTES: u64 = 1024 * 1024;
-const CLEAR_BYTES: u64 = 1024 * 1024;
 const COPY_BUFFER_SIZE: usize = 4 * 1024 * 1024;
 const FAT32_MAX_FILE_BYTES: u64 = 4 * 1024 * 1024 * 1024 - 1;
 const SWM_PART_BYTES: u64 = 3_800_000_000;
@@ -37,6 +39,7 @@ pub struct WindowsImage {
 
 struct SplitArtifacts {
     _temporary_directory: TempDir,
+    source_path: String,
     parts: Vec<PathBuf>,
 }
 
@@ -56,38 +59,28 @@ pub fn prepare(
         "Analisando a estrutura ISO/UDF do Windows…",
     );
 
+    reporter.cancellation.check()?;
     let iso_size = source
         .metadata()
         .map_err(|error| format!("não foi possível consultar a ISO: {error}"))?
         .len();
-    let root = parse_windows_filesystem(&mut source)
-        .map_err(|error| format!("a imagem não contém uma mídia Windows legível: {error}"))?;
+    let root =
+        parse_windows_filesystem(&mut CancellableIo::new(&mut source, &reporter.cancellation))
+            .map_err(|error| format!("a imagem não contém uma mídia Windows legível: {error}"))?;
+    reporter.cancellation.check()?;
     let summary = validate_windows_tree(&root, iso_size)?;
 
     if !has_uefi_loader(&root) {
         return Err("a ISO não contém um carregador UEFI em EFI/BOOT (boot*.efi)".to_owned());
     }
 
-    let install_wim = find_path_case_insensitive(&root, &["sources", "install.wim"]);
-    let install_esd = find_path_case_insensitive(&root, &["sources", "install.esd"]);
-    let existing_swm = find_path_case_insensitive(&root, &["sources", "install.swm"]);
-    if install_wim.is_none() && install_esd.is_none() && existing_swm.is_none() {
-        return Err("a ISO não contém sources/install.wim, install.esd ou install.swm".to_owned());
-    }
-    if install_esd.is_some_and(|node| node.size > FAT32_MAX_FILE_BYTES) {
-        return Err(
-            "sources/install.esd excede 4 GiB e usa compactação sólida; converta-o para WIM antes de gravar"
-                .to_owned(),
-        );
-    }
-
-    let wim_to_split = install_wim.filter(|node| node.size > FAT32_MAX_FILE_BYTES);
+    let wim_to_split = install_image_to_split(&root)?;
     let unattend_bytes = unattend_xml.as_ref().map_or(0, |xml| xml.len() as u64);
     let total_work = summary
         .total_file_bytes
         .saturating_add(
             wim_to_split
-                .map(|node| node.size.saturating_mul(2))
+                .map(|node| estimated_split_bytes(node.size, is_esd(node)).saturating_mul(2))
                 .unwrap_or(0),
         )
         .saturating_add(unattend_bytes);
@@ -124,6 +117,13 @@ pub fn prepare(
         summary.total_file_bytes
     }
     .saturating_add(unattend_bytes);
+
+    // A conversão de ESD altera o tamanho final; use os bytes reais dos SWMs
+    // tanto para a capacidade do destino quanto para o trabalho restante.
+    tracker.total_bytes = tracker
+        .completed_bytes
+        .saturating_add(copied_payload_bytes)
+        .max(1);
 
     let usable_bytes = device.total_bytes.saturating_sub(2 * ALIGNMENT_BYTES);
     let safety_margin = (copied_payload_bytes / 100).max(MIN_FREE_MARGIN_BYTES);
@@ -165,79 +165,93 @@ pub fn write(
         image.tracker.percentage(),
         "Desmontando e bloqueando o dispositivo…",
     );
+    reporter.cancellation.check()?;
     let mut prepared = platform::prepare_device(device)?;
-    let sector_size = platform::logical_sector_size(&prepared.file)?;
+    let result = (|| {
+        let sector_size = platform::logical_sector_size(&prepared.file)?;
 
-    let mut target = SectorIo::new(&mut prepared.file, sector_size, device.total_bytes)
-        .map_err(|error| format!("geometria do dispositivo inválida: {error}"))?;
-    send_status(
-        reporter,
-        operation_id,
-        FlashPhase::Formatting,
-        image.tracker.percentage(),
-        "Criando uma partição MBR/FAT32 compatível com UEFI…",
-    );
-    let (partition_start, partition_end) =
-        create_partition_table(&mut target, device.total_bytes, sector_size)?;
-    format_fat32(
-        &mut target,
-        partition_start,
-        partition_end,
-        sector_size,
-    )?;
-
-    let partition = StreamSlice::new(&mut target, partition_start, partition_end)
-        .map_err(|error| format!("não foi possível abrir a partição FAT32: {error}"))?;
-    let filesystem = FileSystem::new(BufStream::new(partition), FsOptions::new())
-        .map_err(|error| format!("não foi possível abrir o FAT32 recém-criado: {error}"))?;
-    {
-        let root_dir = filesystem.root_dir();
-        copy_directory(
-            &mut image.source,
-            &image.root,
-            &root_dir,
-            "",
-            image.split.as_ref(),
-            operation_id,
+        let mut target = SectorIo::new(&mut prepared.file, sector_size, device.total_bytes)
+            .map_err(|error| format!("geometria do dispositivo inválida: {error}"))?;
+        send_status(
             reporter,
-            &mut image.tracker,
+            operation_id,
+            FlashPhase::Formatting,
+            image.tracker.percentage(),
+            "Criando uma partição MBR/FAT32 compatível com UEFI…",
+        );
+        let (partition_start, partition_end) = create_partition_table(
+            &mut CancellableIo::new(&mut target, &reporter.cancellation),
+            device.total_bytes,
+            sector_size,
         )?;
-        if let Some(xml) = image.unattend_xml.as_deref() {
-            send_status(
-                reporter,
-                operation_id,
-                FlashPhase::Extracting,
-                image.tracker.percentage(),
-                "Adicionando autounattend.xml à raiz do pendrive…",
-            );
-            write_unattend_file(&root_dir, xml)?;
-            image.tracker.add(
-                xml.len() as u64,
-                FlashPhase::Extracting,
-                reporter,
-                operation_id,
-                Some("autounattend.xml criado com sucesso".to_owned()),
-            );
-        }
-    }
-    filesystem
-        .unmount()
-        .map_err(|error| format!("não foi possível finalizar o FAT32: {error}"))?;
+        format_fat32_cancellable(
+            &mut target,
+            partition_start,
+            partition_end,
+            sector_size,
+            &reporter.cancellation,
+            *b"MERAKI     ",
+        )?;
 
-    send_status(
-        reporter,
-        operation_id,
-        FlashPhase::Syncing,
-        100.0,
-        "Sincronizando a tabela de partições e os arquivos…",
-    );
-    let _ = target.finish().map_err(|error| format!("falha ao finalizar os setores: {error}"))?;
-    prepared
-        .file
-        .sync_all()
-        .map_err(|error| format!("falha ao sincronizar o dispositivo: {error}"))?;
+        let partition = StreamSlice::new(&mut target, partition_start, partition_end)
+            .map_err(|error| format!("não foi possível abrir a partição FAT32: {error}"))?;
+        let filesystem = FileSystem::new(BufStream::new(partition), FsOptions::new())
+            .map_err(|error| format!("não foi possível abrir o FAT32 recém-criado: {error}"))?;
+        let copied: Result<(), String> = (|| {
+            let root_dir = filesystem.root_dir();
+            copy_directory(
+                &mut image.source,
+                &image.root,
+                &root_dir,
+                "",
+                image.split.as_ref(),
+                operation_id,
+                reporter,
+                &mut image.tracker,
+            )?;
+            reporter.cancellation.check()?;
+            if let Some(xml) = image.unattend_xml.as_deref() {
+                send_status(
+                    reporter,
+                    operation_id,
+                    FlashPhase::Extracting,
+                    image.tracker.percentage(),
+                    "Adicionando autounattend.xml à raiz do pendrive…",
+                );
+                write_unattend_file(&root_dir, xml)?;
+                image.tracker.add(
+                    xml.len() as u64,
+                    FlashPhase::Extracting,
+                    reporter,
+                    operation_id,
+                    Some("autounattend.xml criado com sucesso".to_owned()),
+                );
+            }
+            Ok(())
+        })();
+        filesystem
+            .unmount()
+            .map_err(|error| format!("não foi possível finalizar o FAT32: {error}"))?;
+        copied?;
+        reporter.cancellation.check()?;
+
+        send_status(
+            reporter,
+            operation_id,
+            FlashPhase::Syncing,
+            100.0,
+            "Sincronizando a tabela de partições e os arquivos…",
+        );
+        let _ = target
+            .finish()
+            .map_err(|error| format!("falha ao finalizar os setores: {error}"))?;
+        Ok(())
+    })();
+    // Buffers FAT já foram drenados antes de sync_all e da liberação dos locks.
+    let result = finish_io(result, prepared.file.sync_all());
     drop(prepared);
-    Ok(())
+    drop(image);
+    result
 }
 
 pub fn validate_unattend_xml(content: Option<&str>) -> Result<Option<String>, String> {
@@ -324,7 +338,7 @@ pub fn validate_unattend_xml(content: Option<&str>) -> Result<Option<String>, St
     Ok(Some(content.to_owned()))
 }
 
-fn parse_windows_filesystem(source: &mut File) -> Result<TreeNode, String> {
+fn parse_windows_filesystem(source: &mut (impl Read + Seek)) -> Result<TreeNode, String> {
     source
         .seek(SeekFrom::Start(0))
         .map_err(|error| error.to_string())?;
@@ -372,6 +386,7 @@ fn validate_windows_tree(root: &TreeNode, iso_size: u64) -> Result<TreeSummary, 
             let relative = components.join("/");
             if node.size > FAT32_MAX_FILE_BYTES
                 && !relative.eq_ignore_ascii_case("sources/install.wim")
+                && !relative.eq_ignore_ascii_case("sources/install.esd")
             {
                 return Err(format!(
                     "o arquivo {relative} excede o limite de 4 GiB do FAT32"
@@ -457,6 +472,42 @@ fn find_path_case_insensitive<'a>(root: &'a TreeNode, components: &[&str]) -> Op
     })
 }
 
+fn is_esd(node: &TreeNode) -> bool {
+    node.name.eq_ignore_ascii_case("install.esd")
+}
+
+fn install_image_to_split(root: &TreeNode) -> Result<Option<&TreeNode>, String> {
+    let wim = find_path_case_insensitive(root, &["sources", "install.wim"])
+        .filter(|node| !node.is_directory);
+    let esd = find_path_case_insensitive(root, &["sources", "install.esd"])
+        .filter(|node| !node.is_directory);
+    let swm = find_path_case_insensitive(root, &["sources", "install.swm"])
+        .filter(|node| !node.is_directory);
+    if wim.is_none() && esd.is_none() && swm.is_none() {
+        return Err("a ISO não contém sources/install.wim, install.esd ou install.swm".to_owned());
+    }
+    let oversized = wim
+        .into_iter()
+        .chain(esd)
+        .find(|node| node.size > FAT32_MAX_FILE_BYTES);
+    if oversized.is_some() {
+        let has_swm_names = find_path_case_insensitive(root, &["sources"]).is_some_and(|sources| {
+            sources.children.iter().any(|node| {
+                let name = node.name.to_ascii_lowercase();
+                name.strip_prefix("install")
+                    .and_then(|name| name.strip_suffix(".swm"))
+                    .is_some_and(|suffix| suffix.bytes().all(|byte| byte.is_ascii_digit()))
+            })
+        });
+        // Um único conjunto de SWMs não pode substituir duas imagens diferentes,
+        // nem ser sobrescrito posteriormente por partes existentes na ISO.
+        if (wim.is_some() && esd.is_some()) || has_swm_names {
+            return Err("a ISO mistura imagens de instalação que conflitam com os arquivos install.swm gerados".to_owned());
+        }
+    }
+    Ok(oversized)
+}
+
 fn prepare_split_wim(
     source: &mut File,
     wim: &TreeNode,
@@ -465,9 +516,18 @@ fn prepare_split_wim(
     reporter: &mut Reporter,
     tracker: &mut ProgressTracker,
 ) -> Result<SplitArtifacts, String> {
-    let required_bytes = required_wim_workspace_bytes(wim.size);
+    reporter.cancellation.check()?;
+    let is_solid_esd = is_esd(wim);
+    let required_bytes = required_wim_workspace_bytes(wim.size, is_solid_esd);
     let temporary_directory = create_wim_workspace(iso_path, required_bytes)?;
-    let input_path = temporary_directory.path().join("source-install.wim");
+    let image_name = if is_solid_esd {
+        "install.esd"
+    } else {
+        "install.wim"
+    };
+    let input_path = temporary_directory
+        .path()
+        .join(format!("source-{image_name}"));
     let output_path = temporary_directory.path().join("install.swm");
 
     send_status(
@@ -475,14 +535,10 @@ fn prepare_split_wim(
         operation_id,
         FlashPhase::Splitting,
         tracker.percentage(),
-        &format!(
-            "Preparando install.wim em {} ({} reservados)…",
-            temporary_directory.path().display(),
-            format_bytes(required_bytes)
-        ),
+        split_progress_message(is_solid_esd),
     );
     let mut temporary_wim = File::create(&input_path)
-        .map_err(|error| format!("não foi possível criar o WIM temporário: {error}"))?;
+        .map_err(|error| format!("não foi possível criar {image_name} temporário: {error}"))?;
     {
         let mut output = TrackedWriter::new(
             &mut temporary_wim,
@@ -492,7 +548,7 @@ fn prepare_split_wim(
             FlashPhase::Splitting,
         );
         cat_node(source, wim, &mut output)
-            .map_err(|error| format!("não foi possível extrair install.wim da ISO: {error}"))?;
+            .map_err(|error| format!("não foi possível extrair {image_name} da ISO: {error}"))?;
     }
     temporary_wim
         .sync_all()
@@ -502,27 +558,46 @@ fn prepare_split_wim(
     split_wim_with_progress(
         &input_path,
         &output_path,
-        wim.size,
+        (estimated_split_bytes(wim.size, is_solid_esd), is_solid_esd),
         operation_id,
         reporter,
         tracker,
     )?;
 
     let parts = collect_and_validate_split_parts(temporary_directory.path())?;
-    // O WIM original não é mais necessário. Liberá-lo aqui reduz o uso do
-    // workspace pela metade durante a cópia dos SWMs para o pendrive.
+    // A API já removeu o WIM intermediário. Libere também a origem extraída;
+    // apenas os SWMs permanecem no workspace durante a gravação do pendrive.
     std::fs::remove_file(&input_path)
         .map_err(|error| format!("não foi possível liberar o WIM temporário: {error}"))?;
 
     Ok(SplitArtifacts {
         _temporary_directory: temporary_directory,
+        source_path: format!("sources/{}", wim.name),
         parts,
     })
 }
 
-fn required_wim_workspace_bytes(wim_bytes: u64) -> u64 {
-    let reserve = (wim_bytes / 10).max(WIM_WORKSPACE_RESERVE_BYTES);
-    wim_bytes.saturating_mul(2).saturating_add(reserve)
+fn estimated_split_bytes(input_bytes: u64, is_solid_esd: bool) -> u64 {
+    // Estimativa de expansão, não limite garantido de descompressão. Erros de
+    // espaço na conversão são tratados antes de abrir/formatar o destino USB.
+    input_bytes.saturating_mul(if is_solid_esd { 4 } else { 1 })
+}
+
+fn required_wim_workspace_bytes(input_bytes: u64, is_solid_esd: bool) -> u64 {
+    let expanded = estimated_split_bytes(input_bytes, is_solid_esd);
+    let payload = input_bytes
+        .saturating_add(expanded)
+        .saturating_add(if is_solid_esd { expanded } else { 0 });
+    let reserve = (payload / 10).max(WIM_WORKSPACE_RESERVE_BYTES);
+    payload.saturating_add(reserve)
+}
+
+fn split_progress_message(is_solid_esd: bool) -> &'static str {
+    if is_solid_esd {
+        "Extraindo e convertendo install.esd em partes SWM…"
+    } else {
+        "Dividindo install.wim em partes SWM…"
+    }
 }
 
 fn create_wim_workspace(iso_path: &Path, required_bytes: u64) -> Result<TempDir, String> {
@@ -577,7 +652,7 @@ where
     }
 
     Err(format!(
-        "espaço temporário insuficiente para dividir install.wim: são necessários {}. Locais verificados: {}. Libere espaço no disco do sistema ou mova a ISO para um volume com mais espaço livre",
+        "espaço temporário insuficiente para preparar a imagem Windows: são necessários aproximadamente {}. Locais verificados: {}. Libere espaço no disco do sistema ou mova a ISO para um volume com mais espaço livre",
         format_bytes(required_bytes),
         attempts.join("; ")
     ))
@@ -671,9 +746,9 @@ fn collect_and_validate_split_parts(directory: &Path) -> Result<Vec<PathBuf>, St
         if size == 0 {
             return Err(format!("{actual_name} foi criado vazio"));
         }
-        if size > FAT32_MAX_FILE_BYTES {
+        if size > SWM_PART_BYTES {
             return Err(format!(
-                "{actual_name} ainda excede 4 GiB; o WIM contém um recurso indivisível muito grande"
+                "{actual_name} excede o limite de {SWM_PART_BYTES} bytes por parte; a imagem contém um recurso indivisível muito grande"
             ));
         }
         OpenOptions::new()
@@ -704,19 +779,28 @@ fn swm_part_number(path: &Path) -> u32 {
 fn split_wim_with_progress(
     input_path: &Path,
     output_path: &Path,
-    work_bytes: u64,
+    split_work: (u64, bool),
     operation_id: &str,
     reporter: &mut Reporter,
     tracker: &mut ProgressTracker,
 ) -> Result<(), String> {
+    let (work_bytes, is_solid_esd) = split_work;
     let output_directory = output_path
         .parent()
         .ok_or_else(|| "diretório temporário SWM inválido".to_owned())?
         .to_path_buf();
     let input_path = input_path.to_path_buf();
     let output_path = output_path.to_path_buf();
-    let worker =
-        thread::spawn(move || super::wim::split(&input_path, &output_path, SWM_PART_BYTES));
+    let cancellation = reporter.cancellation.clone();
+    let worker = thread::spawn(move || {
+        super::wim::split_or_export_image_cancellable(
+            &input_path,
+            &output_path,
+            is_solid_esd,
+            SWM_PART_BYTES,
+            &cancellation,
+        )
+    });
     let mut mapped_progress = 0u64;
 
     while !worker.is_finished() {
@@ -728,7 +812,7 @@ fn split_wim_with_progress(
                 FlashPhase::Splitting,
                 reporter,
                 operation_id,
-                Some("Gerando os arquivos install.swm…".to_owned()),
+                Some(split_progress_message(is_solid_esd).to_owned()),
             );
             mapped_progress = mapped;
         }
@@ -738,6 +822,7 @@ fn split_wim_with_progress(
     let result = worker
         .join()
         .map_err(|_| "o processo interno de divisão do WIM falhou".to_owned())?;
+    reporter.cancellation.check()?;
     if let Err(error) = result {
         return Err(describe_split_failure(
             &output_directory,
@@ -804,75 +889,6 @@ fn split_output_bytes(directory: &Path) -> Result<u64, String> {
         })
 }
 
-fn create_partition_table(
-    target: &mut (impl Read + Write + Seek),
-    device_size: u64,
-    sector_size: u32,
-) -> Result<(u64, u64), String> {
-    let sector_size_u64 = u64::from(sector_size);
-    let start = align_up(ALIGNMENT_BYTES, sector_size_u64);
-    let end = align_down(device_size.saturating_sub(ALIGNMENT_BYTES), sector_size_u64);
-    if end <= start {
-        return Err("o dispositivo é pequeno demais para a mídia Windows".to_owned());
-    }
-    let disk_sectors = device_size / sector_size_u64;
-    let partition_sectors = (end - start) / sector_size_u64;
-    if disk_sectors > u64::from(u32::MAX) || partition_sectors > u64::from(u32::MAX) {
-        return Err("dispositivos maiores que 2 TiB ainda não são suportados".to_owned());
-    }
-
-    clear_range(target, 0, CLEAR_BYTES.min(device_size))?;
-    if device_size > CLEAR_BYTES {
-        clear_range(target, device_size - CLEAR_BYTES, CLEAR_BYTES)?;
-    }
-
-    let signature = Uuid::new_v4();
-    let signature: [u8; 4] = signature.as_bytes()[..4]
-        .try_into()
-        .map_err(|_| "não foi possível gerar a assinatura do disco".to_owned())?;
-    let mut bounded = StreamSlice::new(&mut *target, 0, device_size)
-        .map_err(|error| format!("não foi possível delimitar o dispositivo: {error}"))?;
-    let mut mbr = MBR::new_from(&mut bounded, sector_size, signature)
-        .map_err(|error| format!("não foi possível criar a tabela MBR: {error}"))?;
-    mbr[1] = MBRPartitionEntry {
-        boot: BOOT_ACTIVE,
-        first_chs: CHS::empty(),
-        sys: 0x0c,
-        last_chs: CHS::empty(),
-        starting_lba: u32::try_from(start / sector_size_u64)
-            .map_err(|_| "início da partição fora do limite MBR".to_owned())?,
-        sectors: u32::try_from(partition_sectors)
-            .map_err(|_| "partição fora do limite MBR".to_owned())?,
-    };
-    mbr.write_into(&mut bounded)
-        .map_err(|error| format!("não foi possível gravar a tabela MBR: {error}"))?;
-    bounded
-        .flush()
-        .map_err(|error| format!("não foi possível finalizar a tabela MBR: {error}"))?;
-    Ok((start, end))
-}
-
-fn format_fat32(target: &mut (impl Read + Write + Seek), start: u64, end: u64, sector_size: u32) -> Result<(), String> {
-    let partition_sectors = (end - start) / u64::from(sector_size);
-    let options = FormatVolumeOptions::new()
-        .bytes_per_sector(
-            u16::try_from(sector_size)
-                .map_err(|_| format!("tamanho de setor inválido: {sector_size}"))?,
-        )
-        .bytes_per_cluster(32 * 1024)
-        .fat_type(FatType::Fat32)
-        .total_sectors(
-            u32::try_from(partition_sectors)
-                .map_err(|_| "a partição FAT32 excede o limite suportado".to_owned())?,
-        )
-        .volume_id(Uuid::new_v4().as_u128() as u32)
-        .volume_label(*b"MERAKI     ");
-    let partition = StreamSlice::new(&mut *target, start, end)
-        .map_err(|error| format!("não foi possível delimitar a partição FAT32: {error}"))?;
-    fatfs::format_volume(BufStream::new(partition), options)
-        .map_err(|error| format!("não foi possível formatar a partição FAT32: {error}"))
-}
-
 #[allow(clippy::too_many_arguments)]
 fn copy_directory<T: ReadWriteSeek>(
     source: &mut File,
@@ -885,6 +901,7 @@ fn copy_directory<T: ReadWriteSeek>(
     tracker: &mut ProgressTracker,
 ) -> Result<(), String> {
     for node in &source_directory.children {
+        reporter.cancellation.check()?;
         let relative_path = if parent_path.is_empty() {
             node.name.clone()
         } else {
@@ -907,10 +924,13 @@ fn copy_directory<T: ReadWriteSeek>(
             continue;
         }
 
-        if relative_path.eq_ignore_ascii_case("sources/install.wim")
+        if (relative_path.eq_ignore_ascii_case("sources/install.wim")
+            || relative_path.eq_ignore_ascii_case("sources/install.esd"))
             && let Some(split) = split
+            && relative_path.eq_ignore_ascii_case(&split.source_path)
         {
             for part in &split.parts {
+                reporter.cancellation.check()?;
                 let name = part
                     .file_name()
                     .and_then(|value| value.to_str())
@@ -1006,30 +1026,6 @@ fn write_unattend_file<T: ReadWriteSeek>(
         .map_err(|error| format!("não foi possível gravar autounattend.xml: {error}"))
 }
 
-fn clear_range(target: &mut (impl Read + Write + Seek), start: u64, length: u64) -> Result<(), String> {
-    target
-        .seek(SeekFrom::Start(start))
-        .map_err(|error| format!("não foi possível posicionar o dispositivo: {error}"))?;
-    let zeros = vec![0u8; COPY_BUFFER_SIZE.min(length as usize)];
-    let mut remaining = length;
-    while remaining > 0 {
-        let count = remaining.min(zeros.len() as u64) as usize;
-        target
-            .write_all(&zeros[..count])
-            .map_err(|error| format!("não foi possível limpar assinaturas antigas: {error}"))?;
-        remaining -= count as u64;
-    }
-    Ok(())
-}
-
-const fn align_up(value: u64, alignment: u64) -> u64 {
-    value.div_ceil(alignment) * alignment
-}
-
-const fn align_down(value: u64, alignment: u64) -> u64 {
-    value / alignment * alignment
-}
-
 struct ProgressTracker {
     total_bytes: u64,
     completed_bytes: u64,
@@ -1113,7 +1109,10 @@ impl<'a, W> TrackedWriter<'a, W> {
 
 impl<W: Write> Write for TrackedWriter<'_, W> {
     fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
-        let written = self.inner.write(buffer)?;
+        self.reporter.cancellation.check_io()?;
+        let written = self
+            .inner
+            .write(&buffer[..buffer.len().min(COPY_BUFFER_SIZE)])?;
         self.tracker.add(
             written as u64,
             self.phase,
@@ -1154,17 +1153,118 @@ mod tests {
 
     const TEST_DISK_BYTES: u64 = 3 * 1024 * 1024 * 1024;
     const TEST_SECTOR_BYTES: u32 = 512;
+
+    #[test]
+    fn cancelled_fat_copy_unmounts_and_removes_split_workspace() {
+        use super::super::cancellation::{CancellationToken, is_cancelled_error};
+        struct CancelOnSecondRead {
+            file: File,
+            token: CancellationToken,
+            reads: usize,
+        }
+        impl Read for CancelOnSecondRead {
+            fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+                self.reads += 1;
+                if self.reads == 2 {
+                    self.token.cancel();
+                }
+                self.file.read(bytes)
+            }
+        }
+        let workspace = tempfile::tempdir().unwrap();
+        let workspace_path = workspace.path().to_path_buf();
+        let part = workspace.path().join("install.swm");
+        std::fs::write(&part, vec![0xaa; COPY_BUFFER_SIZE * 2]).unwrap();
+        let split = SplitArtifacts {
+            _temporary_directory: workspace,
+            source_path: "sources/install.esd".to_owned(),
+            parts: vec![part.clone()],
+        };
+        let mut disk = tempfile::tempfile().unwrap();
+        disk.set_len(TEST_DISK_BYTES).unwrap();
+        let (start, end) =
+            create_partition_table(&mut disk, TEST_DISK_BYTES, TEST_SECTOR_BYTES).unwrap();
+        format_fat32(&mut disk, start, end, TEST_SECTOR_BYTES).unwrap();
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let stream = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (_peer, _) = listener.accept().unwrap();
+        let mut reporter = Reporter {
+            stream,
+            token: "test".to_owned(),
+            last_percentage: 0.0,
+            cancellation: CancellationToken::default(),
+            monitor: None,
+        };
+        let mut tracker = ProgressTracker::new((COPY_BUFFER_SIZE * 2) as u64);
+        {
+            let partition = StreamSlice::new(&mut disk, start, end).unwrap();
+            let filesystem = FileSystem::new(BufStream::new(partition), FsOptions::new()).unwrap();
+            {
+                let root = filesystem.root_dir();
+                let sources = root.create_dir("sources").unwrap();
+                let file = sources.create_file("install.swm").unwrap();
+                let mut reader = CancelOnSecondRead {
+                    file: File::open(&part).unwrap(),
+                    token: reporter.cancellation.clone(),
+                    reads: 0,
+                };
+                let mut writer = TrackedWriter::new(
+                    file,
+                    &mut tracker,
+                    &mut reporter,
+                    "test",
+                    FlashPhase::Extracting,
+                );
+                let error = copy_reader(&mut reader, &mut writer).unwrap_err();
+                assert!(is_cancelled_error(&error.to_string()));
+                writer.flush().unwrap();
+            }
+            let root = filesystem.root_dir();
+            let error = copy_directory(
+                &mut File::open(&part).unwrap(),
+                &windows_tree_with_install_image("install.esd", FAT32_MAX_FILE_BYTES + 1),
+                &root,
+                "",
+                Some(&split),
+                "test",
+                &mut reporter,
+                &mut tracker,
+            )
+            .unwrap_err();
+            assert!(is_cancelled_error(&error));
+            drop(root);
+            filesystem.unmount().unwrap();
+        }
+        disk.sync_all().unwrap();
+        drop(split);
+        assert!(!workspace_path.exists());
+        let partition = StreamSlice::new(&mut disk, start, end).unwrap();
+        let filesystem = FileSystem::new(BufStream::new(partition), FsOptions::new()).unwrap();
+        {
+            let root = filesystem.root_dir();
+            let sources = root.open_dir("sources").unwrap();
+            assert!(sources.open_file("install.esd").is_err());
+            let mut bytes = Vec::new();
+            sources
+                .open_file("install.swm")
+                .unwrap()
+                .read_to_end(&mut bytes)
+                .unwrap();
+            assert_eq!(bytes, vec![0xaa; COPY_BUFFER_SIZE]);
+        }
+        filesystem.unmount().unwrap();
+    }
     const TEST_UNATTEND: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 <unattend xmlns="urn:schemas-microsoft-com:unattend">
   <settings pass="windowsPE"></settings>
 </unattend>
 "#;
 
-    fn windows_tree_with_install_wim(size: u64) -> TreeNode {
+    fn windows_tree_with_install_image(name: &str, size: u64) -> TreeNode {
         let mut root = TreeNode::new_directory("/".to_owned());
         let mut sources = TreeNode::new_directory("sources".to_owned());
         sources.add_child(TreeNode::new_file_with_location(
-            "install.wim".to_owned(),
+            name.to_owned(),
             size,
             0,
             size,
@@ -1177,11 +1277,45 @@ mod tests {
     #[test]
     fn permits_an_oversized_install_wim_for_later_splitting() {
         let size = FAT32_MAX_FILE_BYTES + 1;
-        let tree = windows_tree_with_install_wim(size);
+        let tree = windows_tree_with_install_image("install.wim", size);
 
         let summary = validate_windows_tree(&tree, size).unwrap();
 
         assert_eq!(summary.total_file_bytes, size);
+    }
+
+    #[test]
+    fn permits_an_oversized_install_esd_for_later_export_and_splitting() {
+        let size = FAT32_MAX_FILE_BYTES + 1;
+        let tree = windows_tree_with_install_image("INSTALL.ESD", size);
+        assert_eq!(
+            validate_windows_tree(&tree, size).unwrap().total_file_bytes,
+            size
+        );
+        let selected = install_image_to_split(&tree).unwrap().unwrap();
+        assert!(is_esd(selected));
+        assert_eq!(selected.size, size);
+    }
+
+    #[test]
+    fn leaves_install_images_within_the_fat32_limit_unchanged() {
+        for name in ["install.wim", "install.esd"] {
+            let tree = windows_tree_with_install_image(name, FAT32_MAX_FILE_BYTES);
+            assert!(install_image_to_split(&tree).unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn rejects_conflicting_install_images_before_creating_swm_files() {
+        for name in ["install.wim", "install.swm", "INSTALL2.SWM"] {
+            let mut tree = windows_tree_with_install_image("install.esd", FAT32_MAX_FILE_BYTES + 1);
+            tree.children[0].add_child(TreeNode::new_file_with_location(name.to_owned(), 1, 0, 1));
+            assert!(
+                install_image_to_split(&tree)
+                    .unwrap_err()
+                    .contains("conflitam")
+            );
+        }
     }
 
     #[test]
@@ -1205,9 +1339,32 @@ mod tests {
     fn workspace_budget_covers_the_input_and_split_outputs() {
         let five_gib = 5 * 1024 * 1024 * 1024;
 
-        let required = required_wim_workspace_bytes(five_gib);
+        let required = required_wim_workspace_bytes(five_gib, false);
 
         assert!(required >= five_gib * 2 + WIM_WORKSPACE_RESERVE_BYTES);
+    }
+
+    #[test]
+    fn esd_workspace_covers_source_intermediate_parts_and_margin_without_overflow() {
+        let size = 5 * 1024 * 1024 * 1024;
+        let expanded = estimated_split_bytes(size, true);
+        let required = required_wim_workspace_bytes(size, true);
+        assert!(required >= size + 2 * expanded + WIM_WORKSPACE_RESERVE_BYTES);
+        assert!(required > required_wim_workspace_bytes(size, false));
+        assert_eq!(required_wim_workspace_bytes(u64::MAX, true), u64::MAX);
+        assert_eq!(required_wim_workspace_bytes(u64::MAX, false), u64::MAX);
+    }
+
+    #[test]
+    fn reports_the_correct_install_image_during_splitting() {
+        assert_eq!(
+            split_progress_message(true),
+            "Extraindo e convertendo install.esd em partes SWM…"
+        );
+        assert_eq!(
+            split_progress_message(false),
+            "Dividindo install.wim em partes SWM…"
+        );
     }
 
     #[test]
@@ -1291,6 +1448,15 @@ mod tests {
 
     #[test]
     fn creates_a_bootable_mbr_and_a_writable_fat32_filesystem() {
+        assert_copies_split_image_to_fat32("install.wim");
+    }
+
+    #[test]
+    fn replaces_install_esd_with_canonical_swm_files_on_fat32() {
+        assert_copies_split_image_to_fat32("INSTALL.ESD");
+    }
+
+    fn assert_copies_split_image_to_fat32(image_name: &str) {
         let mut disk = NamedTempFile::new().unwrap();
         disk.as_file_mut().set_len(TEST_DISK_BYTES).unwrap();
         let split_directory = tempfile::tempdir().unwrap();
@@ -1300,9 +1466,11 @@ mod tests {
         std::fs::write(&second_part, b"second-swm-part").unwrap();
         let split = SplitArtifacts {
             _temporary_directory: split_directory,
+            source_path: format!("sources/{image_name}"),
             parts: vec![first_part, second_part],
         };
-        let windows_tree = windows_tree_with_install_wim(32);
+        // A ISO vazia faz cat_node falhar se a imagem original for copiada.
+        let windows_tree = windows_tree_with_install_image(image_name, FAT32_MAX_FILE_BYTES + 1);
         let mut empty_iso = NamedTempFile::new().unwrap().reopen().unwrap();
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let address = listener.local_addr().unwrap();
@@ -1316,6 +1484,8 @@ mod tests {
             stream: std::net::TcpStream::connect(address).unwrap(),
             token: "test-token".to_owned(),
             last_percentage: 0.0,
+            cancellation: super::super::cancellation::CancellationToken::default(),
+            monitor: None,
         };
         let mut tracker = ProgressTracker::new(64);
 
@@ -1384,6 +1554,13 @@ mod tests {
         assert_eq!(first, "first-swm-part");
         assert_eq!(second, "second-swm-part");
         assert!(sources.open_file("install.wim").is_err());
+        assert!(sources.open_file("install.esd").is_err());
+        let names = sources
+            .iter()
+            .map(|entry| entry.unwrap().file_name().to_ascii_lowercase())
+            .collect::<HashSet<_>>();
+        assert!(names.contains("install.swm"));
+        assert!(names.contains("install2.swm"));
         drop(reporter);
         let _messages = report_reader.join().unwrap();
     }

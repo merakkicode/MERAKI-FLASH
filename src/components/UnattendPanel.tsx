@@ -3,14 +3,18 @@ import {
   Check,
   Cpu,
   Gauge,
+  Monitor,
   SearchX,
   ShieldCheck,
+  ShieldOff,
   UserRound,
   WandSparkles,
+  WifiOff,
   type LucideIcon,
 } from "lucide-react";
 import {
   type UnattendOptions,
+  validateComputerName,
   validateUnattendOptions,
   validateWindowsUsername,
 } from "../lib/unattend";
@@ -43,6 +47,8 @@ export function UnattendPanel({
   const validationError = enabled ? validateUnattendOptions(options) : null;
   const usernameError =
     enabled && options.createLocalAccount ? validateWindowsUsername(options.username) : null;
+  const computerNameError =
+    enabled && options.setComputerName ? validateComputerName(options.computerName) : null;
 
   const update = <K extends keyof UnattendOptions>(key: K, value: UnattendOptions[K]) => {
     onOptionsChange({ ...options, [key]: value });
@@ -87,6 +93,62 @@ export function UnattendPanel({
       {enabled && (
         <div className="border-t border-[#9dd68f]/10 px-5 py-5 sm:px-6 sm:py-6">
           <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+            <OptimizationToggle
+              checked={options.disableBitLocker}
+              onChange={(checked) => update("disableBitLocker", checked)}
+              icon={ShieldOff}
+              title="Desativar BitLocker automático"
+              description="Impede que o Windows 11 (24H2+) criptografe a unidade C: por padrão em instalações limpas."
+              disabled={disabled}
+            />
+            <OptimizationToggle
+              checked={options.bypassNetworkRequirement}
+              onChange={(checked) => update("bypassNetworkRequirement", checked)}
+              icon={WifiOff}
+              title="Permitir instalação sem internet"
+              description="Habilita a opção 'Não tenho internet' no OOBE se faltar driver Wi-Fi ou rede."
+              disabled={disabled}
+            />
+            <div>
+              <OptimizationToggle
+                checked={options.setComputerName}
+                onChange={(checked) => update("setComputerName", checked)}
+                icon={Monitor}
+                title="Definir nome do computador"
+                description="Personaliza o nome da máquina no sistema (NetBIOS)."
+                disabled={disabled}
+              />
+              {options.setComputerName && (
+                <div className="mt-2 rounded-2xl border border-white/[0.07] bg-black/[0.12] p-4">
+                  <label htmlFor="unattend-computer-name" className="text-[10px] font-semibold tracking-[0.12em] text-white/45 uppercase">
+                    Nome do computador
+                  </label>
+                  <input
+                    id="unattend-computer-name"
+                    type="text"
+                    value={options.computerName}
+                    maxLength={15}
+                    autoComplete="off"
+                    spellCheck={false}
+                    disabled={disabled}
+                    onChange={(event) => update("computerName", event.target.value)}
+                    placeholder="Ex.: PC-TRABALHO"
+                    aria-invalid={Boolean(computerNameError)}
+                    aria-describedby={computerNameError ? "unattend-computer-name-error" : "unattend-computer-name-hint"}
+                    className="mt-2 w-full rounded-xl border border-white/10 bg-[#0B0C10]/65 px-3 py-2.5 text-sm text-white outline-none transition placeholder:text-white/20 focus:border-[#9dd68f]/45 focus:ring-2 focus:ring-[#9dd68f]/10 disabled:opacity-50"
+                  />
+                  {computerNameError ? (
+                    <p id="unattend-computer-name-error" aria-live="polite" className="mt-2 text-[10px] leading-4 text-amber-300/85">
+                      {computerNameError}
+                    </p>
+                  ) : (
+                    <p id="unattend-computer-name-hint" className="mt-2 text-[10px] leading-4 text-white/30">
+                      Até 15 caracteres: letras sem acentos, números e hífens.
+                    </p>
+                  )}
+                </div>
+              )}
+            </div>
             <OptimizationToggle
               checked={options.bypassWindows11Requirements}
               onChange={(checked) => update("bypassWindows11Requirements", checked)}

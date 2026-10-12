@@ -1,3 +1,5 @@
+import { IMAGE_EXTENSIONS, imageFormatLabel, validateImageSelection } from "./lib/images";
+import { CANCELLED_MESSAGE, isFlashBusy, isTerminalPhase, type FlashPhase } from "./lib/flashState";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { confirm, open } from "@tauri-apps/plugin-dialog";
@@ -16,14 +18,19 @@ import {
   LoaderCircle,
   LockKeyhole,
   RefreshCw,
+  RotateCcw,
   ShieldCheck,
   Sparkles,
   Upload,
   Usb,
+  XCircle,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import merakiFlashIcon from "../src-tauri/icons/icon.png";
 import { UnattendPanel } from "./components/UnattendPanel";
+import { HashChecker } from "./components/HashChecker";
+import { FormatModal } from "./components/FormatModal";
+import { canFormatDevice, validateVolumeLabel, normalizeVolumeLabel } from "./lib/format";
 import {
   DEFAULT_UNATTEND_OPTIONS,
   generateAutounattendXml,
@@ -31,18 +38,6 @@ import {
 } from "./lib/unattend";
 
 type OperatingSystem = "windows" | "linux";
-type FlashPhase =
-  | "idle"
-  | "preparing"
-  | "analyzing"
-  | "splitting"
-  | "formatting"
-  | "extracting"
-  | "writing"
-  | "syncing"
-  | "verifying"
-  | "done"
-  | "error";
 
 interface UsbDevice {
   id: string;
@@ -62,6 +57,7 @@ interface UsbDevice {
 interface SelectedIso {
   name: string;
   path: string;
+  selectionId: string;
 }
 
 interface FlashProgress {
@@ -109,6 +105,7 @@ const phaseLabels: Record<FlashPhase, string> = {
   verifying: "Verificando a gravação",
   done: "Pendrive pronto",
   error: "A gravação foi interrompida",
+  cancelled: "Gravação cancelada",
 };
 
 function App() {
@@ -122,8 +119,13 @@ function App() {
   const [notice, setNotice] = useState<string | null>(null);
   const [selectedStep, setSelectedStep] = useState(1);
   const [isConfirming, setIsConfirming] = useState(false);
+  const [formatDevice, setFormatDevice] = useState<UsbDevice | null>(null);
+  const [operationMode, setOperationMode] = useState<"flash" | "format">("flash");
   const [progressReady, setProgressReady] = useState(false);
   const startPending = useRef(false);
+  const flashAccepted = useRef(false);
+  const cancellationRequested = useRef(false);
+  const [isCancelling, setIsCancelling] = useState(false);
   const activeOperation = useRef<string | null>(null);
   const [unattendEnabled, setUnattendEnabled] = useState(false);
   const [unattendOptions, setUnattendOptions] = useState(DEFAULT_UNATTEND_OPTIONS);
@@ -139,19 +141,21 @@ function App() {
   );
   const unattendError =
     showUnattendPanel && unattendEnabled ? validateUnattendOptions(unattendOptions) : null;
+  const imageError = selectedIso ? validateImageSelection(selectedIso.name, operatingSystem) : null;
   const isReady = Boolean(
     operatingSystem &&
       selectedIso &&
       selectedDevice &&
       !selectedDevice.readOnly &&
-      !unattendError,
+      !unattendError && !imageError,
   );
-  const isBusy = isConfirming || !["idle", "done", "error"].includes(progress.phase);
+  const isBusy = isFlashBusy(progress.phase, isConfirming);
   const currentStep = progress.phase !== "idle" ? 4 : selectedStep;
-  const stepSelections = [Boolean(operatingSystem), Boolean(selectedIso), Boolean(selectedDevice) || progress.phase === "done", progress.phase !== "idle" && progress.phase !== "error"];
+  const stepSelections = [Boolean(operatingSystem), Boolean(selectedIso), Boolean(selectedDevice) || progress.phase === "done", progress.phase !== "idle" && progress.phase !== "error" && progress.phase !== "cancelled"];
 
   const resetProgress = () => {
     setProgress(EMPTY_PROGRESS);
+    setOperationMode("flash");
     setNotice(null);
   };
 
@@ -192,14 +196,17 @@ function App() {
       activeOperation.current = event.payload.operationId ?? null;
       setProgress(event.payload);
       setNotice(null);
-      if (event.payload.phase === "done") {
+      if (isTerminalPhase(event.payload.phase)) {
         startPending.current = false;
-        setNotice(event.payload.message ?? "Pendrive gravado com sucesso.");
-        setSelectedDeviceId(null);
-        void refreshDevices();
-      } else if (event.payload.phase === "error") {
-        startPending.current = false;
-        setNotice(event.payload.message ?? "A gravação foi interrompida.");
+        flashAccepted.current = false;
+        cancellationRequested.current = false;
+        setIsCancelling(false);
+        setIsConfirming(false);
+        setNotice(event.payload.message ?? (event.payload.phase === "cancelled" ? CANCELLED_MESSAGE : event.payload.phase === "done" ? "Pendrive gravado com sucesso." : "A gravação foi interrompida."));
+        if (event.payload.phase !== "error") {
+          setSelectedDeviceId(null);
+          void refreshDevices();
+        }
       }
     }).then((dispose) => {
       if (disposed) dispose();
@@ -217,7 +224,7 @@ function App() {
     let unlisten: UnlistenFn | undefined;
     void getCurrentWindow().onCloseRequested((event) => {
       event.preventDefault();
-      setNotice("Aguarde a conclusão da gravação antes de fechar o Meraki Flash.");
+      setNotice("Conclua ou cancele a gravação antes de fechar o Meraki Flash.");
     }).then((dispose) => { if (disposed) dispose(); else unlisten = dispose; })
       .catch(() => {});
     return () => { disposed = true; unlisten?.(); };
@@ -235,14 +242,14 @@ function App() {
       const path = await open({
         multiple: false,
         directory: false,
-        title: "Selecione uma imagem ISO",
-        filters: [{ name: "Imagem de disco", extensions: ["iso"] }],
+        title: "Selecione uma imagem de disco",
+        filters: [{ name: "Imagens de disco e compactadas", extensions: IMAGE_EXTENSIONS }],
       });
 
       if (typeof path === "string") {
         resetProgress();
         setSelectedStep(2);
-        setSelectedIso({ path, name: fileNameFromPath(path) });
+        setSelectedIso({ path, name: fileNameFromPath(path), selectionId: crypto.randomUUID() });
       }
     } catch (error) {
       setNotice(`Não foi possível abrir o seletor: ${readableError(error)}`);
@@ -251,8 +258,26 @@ function App() {
 
   const handleBrowserFile = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
-    if (file) { resetProgress(); setSelectedStep(2); setSelectedIso({ name: file.name, path: file.name }); }
+    if (file) { resetProgress(); setSelectedStep(2); setSelectedIso({ name: file.name, path: file.name, selectionId: crypto.randomUUID() }); }
     event.target.value = "";
+  };
+
+  const sendCancellation = async () => {
+    try {
+      await invoke("cancel_flash");
+    } catch (error) {
+      cancellationRequested.current = false;
+      setIsCancelling(false);
+      setNotice(`Não foi possível solicitar o cancelamento: ${readableError(error)}`);
+    }
+  };
+
+  const handleCancel = async () => {
+    if (!startPending.current || cancellationRequested.current) return;
+    cancellationRequested.current = true;
+    setIsCancelling(true);
+    // Se start_flash ainda não registrou a operação, envie após sua resposta.
+    if (flashAccepted.current) await sendCancellation();
   };
 
   const handleStart = async () => {
@@ -274,6 +299,10 @@ function App() {
     }
 
     startPending.current = true;
+    setOperationMode("flash");
+    flashAccepted.current = false;
+    cancellationRequested.current = false;
+    setIsCancelling(false);
     activeOperation.current = null;
     setIsConfirming(true);
     try {
@@ -305,8 +334,15 @@ function App() {
           unattendXmlContent,
         },
       });
+      if (startPending.current) {
+        flashAccepted.current = true;
+        if (cancellationRequested.current) await sendCancellation();
+      }
     } catch (error) {
       startPending.current = false;
+      flashAccepted.current = false;
+      cancellationRequested.current = false;
+      setIsCancelling(false);
       const message = readableError(error);
       setProgress({
         phase: "error",
@@ -318,6 +354,41 @@ function App() {
       setNotice(message);
     } finally {
       setIsConfirming(false);
+    }
+  };
+
+  const handleFormat = async (label: string) => {
+    if (!formatDevice || !canFormatDevice(selectedDevice, isBusy) || selectedDevice?.id !== formatDevice.id || startPending.current || !progressReady) {
+      setFormatDevice(null);
+      setNotice("O destino não está disponível para formatação. Atualize a lista de pendrives.");
+      return;
+    }
+    const error = validateVolumeLabel(label);
+    if (error) { setNotice(error); return; }
+    const destination = formatDevice;
+    setFormatDevice(null);
+    setOperationMode("format");
+    startPending.current = true;
+    activeOperation.current = null;
+    flashAccepted.current = false;
+    cancellationRequested.current = false;
+    setIsCancelling(false);
+    setNotice(null);
+    setProgress({ ...EMPTY_PROGRESS, phase: "preparing", message: "Aguardando autorização administrativa para formatar…" });
+    try {
+      await invoke("start_format_device", { request: { deviceId: destination.id, volumeLabel: normalizeVolumeLabel(label) } });
+      if (startPending.current) {
+        flashAccepted.current = true;
+        if (cancellationRequested.current) await sendCancellation();
+      }
+    } catch (error) {
+      startPending.current = false;
+      flashAccepted.current = false;
+      cancellationRequested.current = false;
+      setIsCancelling(false);
+      const message = readableError(error);
+      setProgress({ ...EMPTY_PROGRESS, phase: "error", message });
+      setNotice(message);
     }
   };
 
@@ -415,8 +486,8 @@ function App() {
             <section className="meraki-card flex min-h-[244px] flex-col p-5">
               <SectionHeading
                 number="02"
-                title="Selecione a ISO"
-                subtitle="Use uma imagem .iso válida"
+                title="Selecione a imagem"
+                subtitle="Imagens .iso, .img, .raw, .bin, .xz, .gz e .zip"
                 complete={Boolean(selectedIso)}
               />
 
@@ -440,20 +511,27 @@ function App() {
                   {selectedIso ? <FileArchive className="size-5" /> : <Upload className="size-5" />}
                 </span>
                 <span className="mt-4 max-w-full break-all text-sm font-medium">
-                  {selectedIso ? selectedIso.name : "Clique para escolher uma ISO"}
+                  {selectedIso ? selectedIso.name : "Clique para escolher uma imagem"}
                 </span>
                 <span className="mt-1 max-w-full truncate text-xs text-white/35">
                   {selectedIso ? selectedIso.path : "Windows ou Linux · arquivo único"}
                 </span>
+                {selectedIso && (
+                  <span className="mt-2 rounded-full border border-[#8A2BE2]/25 bg-[#8A2BE2]/10 px-2 py-1 text-[10px] text-[#c697ff]">
+                    {imageFormatLabel(selectedIso.name)}
+                  </span>
+                )}
                 <span className="mt-5 inline-flex items-center gap-2 rounded-xl border border-white/[0.08] bg-white/[0.035] px-3 py-2 text-[11px] font-medium text-white/65">
                   <FolderOpen className="size-3.5" />
                   {selectedIso ? "Trocar arquivo" : "Abrir explorador"}
                 </span>
               </button>
+              {imageError && <p role="alert" className="mt-3 text-xs leading-5 text-amber-300/90">{imageError}</p>}
+              {selectedIso && <HashChecker key={selectedIso.selectionId} path={selectedIso.path} disabled={isBusy} />}
               <input
                 ref={browserFileInput}
                 type="file"
-                accept=".iso,application/x-iso9660-image"
+                accept=".iso,.img,.raw,.bin,.xz,.gz,.zip,application/x-iso9660-image"
                 className="hidden"
                 onChange={handleBrowserFile}
               />
@@ -538,6 +616,11 @@ function App() {
                 )}
               </div>
 
+              {selectedDevice && <button type="button" onClick={() => setFormatDevice(selectedDevice)}
+                disabled={!canFormatDevice(selectedDevice, isBusy) || isRefreshing || !progressReady}
+                className="mt-3 inline-flex items-center justify-center gap-2 rounded-xl border border-[#8cbe80]/20 bg-[#8cbe80]/5 px-3 py-2.5 text-xs text-[#9dd68f] transition hover:bg-[#8cbe80]/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#8cbe80]/60 disabled:cursor-not-allowed disabled:opacity-40">
+                <RotateCcw className="size-3.5" />Restaurar / Formatar pendrive
+              </button>}
               <div className="mt-3 flex items-start gap-2 rounded-xl bg-[#5fe8d3]/[0.055] px-3 py-2.5 text-[10px] leading-4 text-[#9adfd5]/70">
                 <ShieldCheck className="mt-0.5 size-3.5 shrink-0" />
                 Discos internos são ocultados para reduzir o risco de seleção acidental.
@@ -563,8 +646,8 @@ function App() {
                     <HardDrive className="size-4" />
                   </span>
                   <div>
-                    <p className="text-xs font-semibold text-white/85">04 · Gravação</p>
-                    <p className="mt-0.5 text-[11px] text-white/35">{phaseLabels[progress.phase]}</p>
+                    <p className="text-xs font-semibold text-white/85">04 · {operationMode === "format" ? "Restauração" : "Gravação"}</p>
+                    <p className="mt-0.5 text-[11px] text-white/35">{operationMode === "format" && progress.phase === "cancelled" ? "Formatação cancelada" : phaseLabels[progress.phase]}</p>
                   </div>
                 </div>
                 <span className="font-mono text-sm font-semibold text-[#72f5ff] tabular-nums">
@@ -592,6 +675,7 @@ function App() {
               </div>
             </div>
 
+            <div className="flex flex-col gap-2">
             <button
               type="button"
               onClick={() => void handleStart()}
@@ -624,8 +708,21 @@ function App() {
                 {!isBusy && <ArrowRight className="size-4 transition group-hover:translate-x-0.5" />}
               </span>
             </button>
+            {isBusy && progress.phase !== "idle" && !isTerminalPhase(progress.phase) && (
+              <button
+                type="button"
+                onClick={() => void handleCancel()}
+                disabled={isCancelling}
+                className="flex items-center justify-center gap-2 rounded-xl border border-rose-500/25 bg-rose-500/10 px-4 py-2.5 text-xs font-medium text-rose-300 transition hover:bg-rose-500/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-400/60 disabled:cursor-wait disabled:opacity-60"
+              >
+                {isCancelling ? <LoaderCircle className="size-4 animate-spin" /> : <XCircle className="size-4" />}
+                {isCancelling ? "Cancelando…" : operationMode === "format" ? "Cancelar formatação" : "Cancelar gravação"}
+              </button>
+            )}
+            </div>
           </section>
 
+          {formatDevice && <FormatModal device={formatDevice} onClose={() => setFormatDevice(null)} onConfirm={(label) => void handleFormat(label)} />}
           {notice && (
             <div className="mt-3 flex items-start gap-2.5 rounded-xl border border-[#00F0FF]/10 bg-[#00F0FF]/[0.035] px-4 py-3 text-xs leading-5 text-[#b8f9fd]/75">
               <Info className="mt-0.5 size-4 shrink-0 text-[#61eff8]" />

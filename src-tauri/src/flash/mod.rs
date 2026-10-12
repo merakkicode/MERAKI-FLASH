@@ -1,25 +1,36 @@
+mod cancellation;
+use cancellation::{
+    CANCELLED_MESSAGE, CancellableIo, CancellationToken, finish_io, is_cancelled_error,
+};
+mod clean_drive;
+mod disk_layout;
+mod image_stream;
 mod platform;
-mod sector_io;
 pub mod protocol;
+mod sector_io;
 mod wim;
 mod windows_iso;
 
 use crate::elevation;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use meraki_flash_core::{UsbDevice, find_removable_device, validate_iso_for_device};
+use image_stream::{ImageSource, copy_stream, verify_stream};
+use meraki_flash_core::{UsbDevice, find_removable_device, validate_image_for_device};
+use protocol::{ClientControlMessage, ControlAction, OperationKind, StartFormatRequest};
 use protocol::{
     ElevatedFlashRequest, FlashPhase, FlashProgress, HelperEnvelope, ImageKind, StartFlashRequest,
     StartFlashResponse,
 };
 use std::fs::File;
-use std::io::{BufReader as StdBufReader, Read, Seek, SeekFrom, Write};
+use std::io::{Seek, SeekFrom, Write};
 use std::net::TcpStream as StdTcpStream;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::path::Path;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::watch;
 use uuid::Uuid;
 
 pub const HELPER_FLAG: &str = "--meraki-flash-elevated-helper";
@@ -28,19 +39,38 @@ const BUFFER_SIZE: usize = 4 * 1024 * 1024;
 
 #[derive(Default)]
 pub struct FlashManager {
-    running: AtomicBool,
+    cancellation: Mutex<Option<watch::Sender<bool>>>,
 }
 
 impl FlashManager {
-    pub fn begin(&self) -> Result<(), String> {
-        self.running
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .map(|_| ())
-            .map_err(|_| "já existe uma gravação em andamento".to_owned())
+    pub fn begin(&self) -> Result<watch::Receiver<bool>, String> {
+        let mut active = self
+            .cancellation
+            .lock()
+            .map_err(|_| "gerenciador indisponível")?;
+        if active.is_some() {
+            return Err("já existe uma gravação em andamento".to_owned());
+        }
+        let (sender, receiver) = watch::channel(false);
+        *active = Some(sender);
+        Ok(receiver)
+    }
+
+    pub fn cancel(&self) -> Result<(), String> {
+        let active = self
+            .cancellation
+            .lock()
+            .map_err(|_| "gerenciador indisponível")?;
+        if let Some(sender) = active.as_ref() {
+            sender.send_replace(true);
+        }
+        Ok(())
     }
 
     pub fn finish(&self) {
-        self.running.store(false, Ordering::Release);
+        if let Ok(mut active) = self.cancellation.lock() {
+            *active = None;
+        }
     }
 }
 
@@ -61,11 +91,63 @@ pub async fn start_flash(
     if device.read_only {
         return Err("o dispositivo selecionado está protegido contra gravação".to_owned());
     }
-    let (iso_path, iso_size) = validate_iso_for_device(&request.iso_path, &device)?;
+    validate_image_kind(Path::new(&request.iso_path), request.image_kind)?;
+    let (iso_path, iso_size) = validate_image_for_device(&request.iso_path, &device)?;
     let image_kind = request.image_kind;
     let unattend_xml_content =
         validate_unattend_for_image(image_kind, request.unattend_xml_content.as_deref())?;
-    manager.begin()?;
+    launch_operation(
+        app,
+        manager,
+        device,
+        Operation::Flash {
+            iso_path: iso_path.to_string_lossy().into_owned(),
+            iso_size,
+            image_kind,
+            unattend_xml_content,
+        },
+    )
+}
+
+enum Operation {
+    Flash {
+        iso_path: String,
+        iso_size: u64,
+        image_kind: ImageKind,
+        unattend_xml_content: Option<String>,
+    },
+    Format {
+        volume_label: String,
+    },
+}
+
+pub async fn start_format_device(
+    app: AppHandle,
+    manager: &FlashManager,
+    request: StartFormatRequest,
+) -> Result<StartFlashResponse, String> {
+    let volume_label = clean_drive::normalize_label(request.volume_label.as_deref())?;
+    let device =
+        tauri::async_runtime::spawn_blocking(move || find_removable_device(&request.device_id))
+            .await
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| {
+                "o dispositivo não está conectado ou foi bloqueado por segurança".to_owned()
+            })?;
+    if device.read_only {
+        return Err("o dispositivo está protegido contra gravação".to_owned());
+    }
+    launch_operation(app, manager, device, Operation::Format { volume_label })
+}
+
+fn launch_operation(
+    app: AppHandle,
+    manager: &FlashManager,
+    device: UsbDevice,
+    operation: Operation,
+) -> Result<StartFlashResponse, String> {
+    let cancellation = manager.begin()?;
 
     let operation_id = Uuid::new_v4().to_string();
     let response = StartFlashResponse {
@@ -76,18 +158,23 @@ pub async fn start_flash(
         let result = run_flash_operation(
             &app_for_task,
             device,
-            iso_path.to_string_lossy().into_owned(),
-            iso_size,
-            image_kind,
-            unattend_xml_content,
+            operation,
             operation_id.clone(),
+            cancellation,
         )
         .await;
 
         app_for_task.state::<FlashManager>().finish();
-        let terminal = result.unwrap_or_else(|message| FlashProgress::new(
-            operation_id, FlashPhase::Error, 0.0, 0.0, None, Some(message),
-        ));
+        let terminal = result.unwrap_or_else(|message| {
+            FlashProgress::new(
+                operation_id,
+                FlashPhase::Error,
+                0.0,
+                0.0,
+                None,
+                Some(message),
+            )
+        });
         emit_progress(&app_for_task, terminal);
     });
 
@@ -97,11 +184,9 @@ pub async fn start_flash(
 async fn run_flash_operation(
     app: &AppHandle,
     device: UsbDevice,
-    iso_path: String,
-    iso_size: u64,
-    image_kind: ImageKind,
-    unattend_xml_content: Option<String>,
+    operation: Operation,
     operation_id: String,
+    cancellation: watch::Receiver<bool>,
 ) -> Result<FlashProgress, String> {
     emit_progress(
         app,
@@ -123,7 +208,33 @@ async fn run_flash_operation(
         .map_err(|error| format!("não foi possível configurar o canal de progresso: {error}"))?
         .port();
     let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+    let (operation_kind, volume_label, iso_path, iso_size, image_kind, unattend_xml_content) =
+        match operation {
+            Operation::Flash {
+                iso_path,
+                iso_size,
+                image_kind,
+                unattend_xml_content,
+            } => (
+                OperationKind::Flash,
+                None,
+                iso_path,
+                iso_size,
+                image_kind,
+                unattend_xml_content,
+            ),
+            Operation::Format { volume_label } => (
+                OperationKind::Format,
+                Some(volume_label),
+                String::new(),
+                0,
+                ImageKind::Windows,
+                None,
+            ),
+        };
     let helper_request = ElevatedFlashRequest {
+        operation_kind,
+        volume_label,
         operation_id: operation_id.clone(),
         token: token.clone(),
         callback_port,
@@ -156,11 +267,31 @@ async fn run_flash_operation(
         }
     };
 
-    let forwarded = forward_progress(app, reader, first_progress, &token, &operation_id).await;
+    let (read, write) = reader.into_inner().into_split();
+    let forwarded = {
+        let progress = forward_progress(
+            app,
+            BufReader::new(read),
+            first_progress,
+            &token,
+            &operation_id,
+        );
+        tokio::pin!(progress);
+        let control = forward_control(write, token.clone(), cancellation);
+        tokio::pin!(control);
+        tokio::select! {
+            result = &mut progress => result,
+            result = &mut control => {
+                // A falha/fechamento da metade de escrita faz o helper abortar.
+                let forwarded = progress.await;
+                forwarded.map_err(|error| result.err().unwrap_or(error))
+            }
+        }
+    };
     let helper_result = elevation.await;
     let terminal = forwarded?;
     match (helper_result, terminal.phase) {
-        (Ok(0), FlashPhase::Done) | (_, FlashPhase::Error) => Ok(terminal),
+        (Ok(0), FlashPhase::Done | FlashPhase::Cancelled) | (_, FlashPhase::Error) => Ok(terminal),
         (Err(error), _) => Err(error),
         (Ok(code), _) => Err(format!("o helper terminou com o código {code}")),
     }
@@ -182,10 +313,11 @@ async fn accept_authenticated(
 
         let mut reader = BufReader::new(stream);
         let mut line = String::new();
-        let bytes = match tokio::time::timeout(Duration::from_secs(3), reader.read_line(&mut line)).await {
-            Ok(Ok(bytes)) => bytes,
-            _ => continue,
-        };
+        let bytes =
+            match tokio::time::timeout(Duration::from_secs(3), reader.read_line(&mut line)).await {
+                Ok(Ok(bytes)) => bytes,
+                _ => continue,
+            };
         if bytes == 0 {
             continue;
         }
@@ -198,15 +330,84 @@ async fn accept_authenticated(
     }
 }
 
+async fn forward_control(
+    mut writer: tokio::net::tcp::OwnedWriteHalf,
+    token: String,
+    mut cancellation: watch::Receiver<bool>,
+) -> Result<(), String> {
+    let cancelled = *cancellation.borrow();
+    let mut message = serde_json::to_vec(&ClientControlMessage {
+        token: token.clone(),
+        action: if cancelled {
+            ControlAction::Cancel
+        } else {
+            ControlAction::Start
+        },
+    })
+    .map_err(|error| error.to_string())?;
+    message.push(b'\n');
+    writer
+        .write_all(&message)
+        .await
+        .map_err(|error| error.to_string())?;
+    if !cancelled {
+        let _ = cancellation.wait_for(|cancelled| *cancelled).await;
+        let mut message = serde_json::to_vec(&ClientControlMessage {
+            token,
+            action: ControlAction::Cancel,
+        })
+        .map_err(|error| error.to_string())?;
+        message.push(b'\n');
+        writer
+            .write_all(&message)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn monitor_control(
+    stream: StdTcpStream,
+    token: &str,
+    cancellation: &CancellationToken,
+    ready: std::sync::mpsc::Sender<()>,
+) {
+    use std::io::{BufRead, Read};
+    let mut reader = std::io::BufReader::new(stream);
+    loop {
+        let mut line = Vec::new();
+        // Um cliente inválido não pode aumentar indefinidamente a memória do helper.
+        match reader.by_ref().take(4097).read_until(b'\n', &mut line) {
+            Ok(0) | Err(_) => break,
+            Ok(_) if line.len() > 4096 || !line.ends_with(b"\n") => break,
+            Ok(_) => {}
+        }
+        let Ok(message) = serde_json::from_slice::<ClientControlMessage>(&line) else {
+            break;
+        };
+        if message.token != token {
+            continue;
+        }
+        if message.action == ControlAction::Cancel {
+            cancellation.cancel();
+            let _ = ready.send(());
+            return;
+        }
+        let _ = ready.send(());
+    }
+    cancellation.cancel();
+    let _ = ready.send(());
+}
+
 async fn forward_progress(
     app: &AppHandle,
-    mut reader: BufReader<TcpStream>,
+    mut reader: BufReader<tokio::net::tcp::OwnedReadHalf>,
     first_progress: FlashProgress,
     token: &str,
     operation_id: &str,
 ) -> Result<FlashProgress, String> {
     let mut terminal = first_progress;
-    if !matches!(terminal.phase, FlashPhase::Done | FlashPhase::Error) {
+    if !terminal.phase.is_terminal() {
         emit_progress(app, terminal.clone());
     }
 
@@ -225,9 +426,12 @@ async fn forward_progress(
             return Err("o helper enviou uma mensagem não autenticada".to_owned());
         }
         terminal = envelope.progress;
-        if !matches!(terminal.phase, FlashPhase::Done | FlashPhase::Error) {
+        if !terminal.phase.is_terminal() {
             emit_progress(app, terminal.clone());
         }
+    }
+    if !terminal.phase.is_terminal() {
+        return Err("o helper encerrou sem confirmar a finalização".to_owned());
     }
     Ok(terminal)
 }
@@ -258,16 +462,27 @@ pub fn run_elevated_helper(encoded_request: &str) -> i32 {
         }
     };
     if let Err(error) = execute_elevated_flash(&request, &mut reporter) {
+        let cancelled = is_cancelled_error(&error);
         let percentage = reporter.last_percentage();
         let _ = reporter.send(FlashProgress::new(
             request.operation_id.clone(),
-            FlashPhase::Error,
+            if cancelled {
+                FlashPhase::Cancelled
+            } else {
+                FlashPhase::Error
+            },
             percentage,
             0.0,
             None,
-            Some(error),
+            Some(if cancelled {
+                if request.operation_kind == OperationKind::Format {
+                    "A formatação foi cancelada. O pendrive foi liberado; formate-o novamente antes de usar.".to_owned()
+                } else { CANCELLED_MESSAGE.to_owned() }
+            } else {
+                error
+            }),
         ));
-        return 1;
+        return if cancelled { 0 } else { 1 };
     }
     0
 }
@@ -288,20 +503,43 @@ fn execute_elevated_flash(
         Some("Validando novamente o dispositivo…".to_owned()),
     ))?;
 
+    reporter.cancellation.check()?;
     let device = revalidate_device(request)?;
 
-    let (iso_path, iso_size) = validate_iso_for_device(&request.iso_path, &device)?;
-    if iso_size != request.iso_size {
-        return Err("o tamanho da ISO mudou depois da confirmação".to_owned());
+    if request.operation_kind == OperationKind::Format {
+        clean_drive::execute(
+            &device,
+            request.volume_label.as_deref(),
+            &request.operation_id,
+            reporter,
+        )?;
+        reporter.cancellation.check()?;
+        reporter.send(FlashProgress::new(
+            &request.operation_id,
+            FlashPhase::Done,
+            100.0,
+            0.0,
+            Some(0),
+            Some(
+                "Pendrive restaurado e formatado com sucesso! Já está pronto para uso comum."
+                    .to_owned(),
+            ),
+        ))?;
+        return Ok(());
     }
-    let mut source =
-        File::open(&iso_path).map_err(|error| format!("não foi possível abrir a ISO: {error}"))?;
+
+    validate_image_kind(Path::new(&request.iso_path), request.image_kind)?;
+    let (iso_path, iso_size) = validate_image_for_device(&request.iso_path, &device)?;
+    if iso_size != request.iso_size {
+        return Err("o tamanho da imagem mudou depois da confirmação".to_owned());
+    }
     let unattend_xml_content =
         validate_unattend_for_image(request.image_kind, request.unattend_xml_content.as_deref())?;
 
     match request.image_kind {
         ImageKind::Linux => {
-            validate_hybrid_image(&mut source)?;
+            let mut source = ImageSource::open(&iso_path, device.total_bytes)?;
+            source.validate_header()?;
             reporter.send(FlashProgress::new(
                 request.operation_id.clone(),
                 FlashPhase::Preparing,
@@ -310,12 +548,12 @@ fn execute_elevated_flash(
                 None,
                 Some("Desmontando e bloqueando o dispositivo…".to_owned()),
             ))?;
+            reporter.cancellation.check()?;
             let mut prepared = platform::prepare_device(&device)?;
             let sector_size = platform::logical_sector_size(&prepared.file)?;
             write_image(
                 source,
                 &mut prepared.file,
-                iso_size,
                 (sector_size, device.total_bytes),
                 &request.operation_id,
                 reporter,
@@ -323,6 +561,8 @@ fn execute_elevated_flash(
             drop(prepared);
         }
         ImageKind::Windows => {
+            let source = File::open(&iso_path)
+                .map_err(|error| format!("não foi possível abrir a ISO: {error}"))?;
             let image = windows_iso::prepare(
                 source,
                 &iso_path,
@@ -333,11 +573,13 @@ fn execute_elevated_flash(
             )?;
             // Dividir WIMs grandes pode levar minutos. A identidade física é
             // conferida novamente imediatamente antes da primeira escrita.
+            reporter.cancellation.check()?;
             let device = revalidate_device(request)?;
             windows_iso::write(image, &device, &request.operation_id, reporter)?;
         }
     }
 
+    reporter.cancellation.check()?;
     let _ = reporter.send(FlashProgress::new(
         request.operation_id.clone(),
         FlashPhase::Done,
@@ -381,61 +623,77 @@ fn revalidate_device(request: &ElevatedFlashRequest) -> Result<UsbDevice, String
 }
 
 fn write_image(
-    source: File,
+    source: ImageSource,
     target_file: &mut File,
-    total_bytes: u64,
     geometry: (u32, u64),
     operation_id: &str,
     reporter: &mut Reporter,
 ) -> Result<(), String> {
-    let mut source = StdBufReader::with_capacity(BUFFER_SIZE, source);
+    let result = write_image_inner(source, target_file, geometry, operation_id, reporter);
+    finish_io(result, target_file.sync_all())
+}
+
+fn write_image_inner(
+    mut source: ImageSource,
+    target_file: &mut File,
+    geometry: (u32, u64),
+    operation_id: &str,
+    reporter: &mut Reporter,
+) -> Result<(), String> {
     let mut target = sector_io::SectorIo::new(&mut *target_file, geometry.0, geometry.1)
         .map_err(|error| error.to_string())?;
     target
         .seek(SeekFrom::Start(0))
-        .map_err(|error| format!("não foi possível posicionar o dispositivo: {error}"))?;
-
+        .map_err(|error| error.to_string())?;
     let started = Instant::now();
     let mut last_report = Instant::now();
-    let mut written = 0u64;
-    let mut buffer = vec![0u8; BUFFER_SIZE];
+    let expected = source.expanded_size;
+    let cancellation = reporter.cancellation.clone();
+    cancellation.check()?;
     let _ = reporter.send(FlashProgress::new(
         operation_id,
         FlashPhase::Writing,
         0.0,
         0.0,
         None,
-        Some("Gravando a imagem bit a bit…".to_owned()),
+        Some("Gravando a imagem em streaming…".to_owned()),
     ));
-
-    while written < total_bytes {
-        let wanted = usize::try_from((total_bytes - written).min(BUFFER_SIZE as u64))
-            .map_err(|_| "tamanho de bloco inválido".to_owned())?;
-        source
-            .read_exact(&mut buffer[..wanted])
-            .map_err(|error| format!("falha ao ler a ISO: {error}"))?;
-        target
-            .write_all(&buffer[..wanted])
-            .map_err(|error| format!("falha ao escrever no dispositivo: {error}"))?;
-        written += wanted as u64;
-
-        if last_report.elapsed() >= Duration::from_millis(250) || written == total_bytes {
-            let elapsed = started.elapsed().as_secs_f64().max(0.001);
-            let speed = written as f64 / elapsed;
-            let eta = (speed > 0.0).then(|| ((total_bytes - written) as f64 / speed).ceil() as u64);
-            let percentage = written as f64 * 90.0 / total_bytes as f64;
-            let _ = reporter.send(FlashProgress::new(
-                operation_id,
-                FlashPhase::Writing,
-                percentage,
-                speed,
-                eta,
-                None,
-            ));
-            last_report = Instant::now();
-        }
-    }
-
+    let written = source.with_reader(|reader, progress| {
+        copy_stream(
+            &mut CancellableIo::new(reader, &cancellation),
+            &mut CancellableIo::new(&mut target, &cancellation),
+            geometry.1,
+            expected,
+            |written| {
+                if last_report.elapsed() >= Duration::from_millis(250) {
+                    let elapsed = started.elapsed().as_secs_f64().max(0.001);
+                    let fraction = expected
+                        .map_or_else(|| progress.fraction(), |size| written as f64 / size as f64);
+                    // O decoder pode antecipar a leitura do arquivo. Só conclui após EOF/CRC.
+                    let percentage = fraction.min(0.999) * 90.0;
+                    let eta = (fraction > 0.0 && fraction < 1.0)
+                        .then(|| (elapsed * (1.0 - fraction) / fraction).ceil() as u64);
+                    let _ = reporter.send(FlashProgress::new(
+                        operation_id,
+                        FlashPhase::Writing,
+                        percentage,
+                        written as f64 / elapsed,
+                        eta,
+                        None,
+                    ));
+                    last_report = Instant::now();
+                }
+            },
+        )
+    })?;
+    let _ = reporter.send(FlashProgress::new(
+        operation_id,
+        FlashPhase::Writing,
+        90.0,
+        written as f64 / started.elapsed().as_secs_f64().max(0.001),
+        Some(0),
+        None,
+    ));
     let _ = reporter.send(FlashProgress::new(
         operation_id,
         FlashPhase::Syncing,
@@ -445,30 +703,48 @@ fn write_image(
         Some("Sincronizando os dados com o dispositivo…".to_owned()),
     ));
     let _ = target.finish().map_err(|error| error.to_string())?;
-    target_file.sync_all()
+    target_file
+        .sync_all()
         .map_err(|error| format!("falha ao sincronizar o dispositivo: {error}"))?;
     let mut target = sector_io::SectorIo::new(target_file, geometry.0, geometry.1)
         .map_err(|error| error.to_string())?;
-    source.seek(SeekFrom::Start(0)).map_err(|error| error.to_string())?;
-    let _ = reporter.send(FlashProgress::new(operation_id, FlashPhase::Verifying,
-        90.0, 0.0, None, Some("Conferindo os dados gravados…".to_owned())));
-    let mut verified = 0u64;
-    let mut actual = vec![0; BUFFER_SIZE];
-    while verified < total_bytes {
-        let count = (total_bytes - verified).min(BUFFER_SIZE as u64) as usize;
-        source.read_exact(&mut buffer[..count]).map_err(|error| format!("falha ao reler a ISO: {error}"))?;
-        target.read_exact(&mut actual[..count]).map_err(|error| format!("falha ao verificar o dispositivo: {error}"))?;
-        if buffer[..count] != actual[..count] {
-            return Err(format!("a verificação encontrou dados diferentes no dispositivo a partir do byte {verified}; grave novamente antes de usá-lo"));
-        }
-        verified += count as u64;
-        if last_report.elapsed() >= Duration::from_millis(250) || verified == total_bytes {
-            let _ = reporter.send(FlashProgress::new(operation_id, FlashPhase::Verifying,
-                90.0 + verified as f64 * 10.0 / total_bytes as f64, 0.0, None,
-                Some("Conferindo os dados gravados…".to_owned())));
-            last_report = Instant::now();
-        }
-    }
+    let _ = reporter.send(FlashProgress::new(
+        operation_id,
+        FlashPhase::Verifying,
+        90.0,
+        0.0,
+        None,
+        Some("Conferindo os dados gravados…".to_owned()),
+    ));
+    source.with_reader(|reader, _| {
+        verify_stream(
+            &mut CancellableIo::new(reader, &cancellation),
+            &mut CancellableIo::new(&mut target, &cancellation),
+            written,
+            |verified| {
+                if last_report.elapsed() >= Duration::from_millis(250) {
+                    let _ = reporter.send(FlashProgress::new(
+                        operation_id,
+                        FlashPhase::Verifying,
+                        (90.0 + verified as f64 * 10.0 / written as f64).min(99.9),
+                        0.0,
+                        None,
+                        None,
+                    ));
+                    last_report = Instant::now();
+                }
+            },
+        )
+    })?;
+    cancellation.check()?;
+    let _ = reporter.send(FlashProgress::new(
+        operation_id,
+        FlashPhase::Verifying,
+        100.0,
+        0.0,
+        Some(0),
+        Some("Verificação concluída.".to_owned()),
+    ));
     Ok(())
 }
 
@@ -476,6 +752,17 @@ struct Reporter {
     stream: StdTcpStream,
     token: String,
     last_percentage: f64,
+    cancellation: CancellationToken,
+    monitor: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for Reporter {
+    fn drop(&mut self) {
+        let _ = self.stream.shutdown(std::net::Shutdown::Both);
+        if let Some(monitor) = self.monitor.take() {
+            let _ = monitor.join();
+        }
+    }
 }
 
 impl Reporter {
@@ -490,27 +777,56 @@ impl Reporter {
         stream
             .set_write_timeout(Some(Duration::from_secs(5)))
             .map_err(|error| format!("falha ao configurar o canal de progresso: {error}"))?;
-        Ok(Self {
+        let cancellation = CancellationToken::default();
+        let control_stream = stream.try_clone().map_err(|error| error.to_string())?;
+        let control_token = request.token.clone();
+        let monitor_token = cancellation.clone();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let monitor = std::thread::spawn(move || {
+            monitor_control(control_stream, &control_token, &monitor_token, ready_tx)
+        });
+        let mut reporter = Self {
             stream,
             token: request.token.clone(),
             last_percentage: 0.0,
-        })
+            cancellation,
+            monitor: Some(monitor),
+        };
+        reporter.send(FlashProgress::new(
+            &request.operation_id,
+            FlashPhase::Preparing,
+            0.0,
+            0.0,
+            None,
+            Some("Conectando ao aplicativo…".to_owned()),
+        ))?;
+        // Nenhuma operação destrutiva começa sem autorização autenticada do pai.
+        if ready_rx.recv_timeout(Duration::from_secs(120)).is_err() {
+            reporter.cancellation.cancel();
+        }
+        Ok(reporter)
     }
 
     fn send(&mut self, progress: FlashProgress) -> Result<(), String> {
         self.last_percentage = progress.percentage;
-        serde_json::to_writer(
-            &mut self.stream,
-            &HelperEnvelope {
-                token: self.token.clone(),
-                progress,
-            },
-        )
-        .map_err(|error| format!("falha ao serializar o progresso: {error}"))?;
-        self.stream
-            .write_all(b"\n")
-            .and_then(|_| self.stream.flush())
-            .map_err(|error| format!("falha ao enviar o progresso: {error}"))
+        let result = (|| {
+            serde_json::to_writer(
+                &mut self.stream,
+                &HelperEnvelope {
+                    token: self.token.clone(),
+                    progress,
+                },
+            )
+            .map_err(|error| format!("falha ao serializar o progresso: {error}"))?;
+            self.stream
+                .write_all(b"\n")
+                .and_then(|_| self.stream.flush())
+                .map_err(|error| format!("falha ao enviar o progresso: {error}"))
+        })();
+        if result.is_err() {
+            self.cancellation.cancel();
+        }
+        result
     }
 
     fn last_percentage(&self) -> f64 {
@@ -518,18 +834,19 @@ impl Reporter {
     }
 }
 
-fn validate_hybrid_image(source: &mut File) -> Result<(), String> {
-    let mut header = [0u8; 512];
-    source.seek(SeekFrom::Start(0)).and_then(|_| source.read_exact(&mut header))
-        .map_err(|error| format!("não foi possível validar a imagem híbrida: {error}"))?;
-    source.seek(SeekFrom::Start(0)).map_err(|error| error.to_string())?;
-    if header[510..] != [0x55, 0xaa] || !header[446..510].as_chunks::<16>().0.iter()
-        .any(|entry| entry[4] != 0 && entry[12..16] != [0, 0, 0, 0]) {
-        return Err("a imagem Linux não contém uma tabela de partições híbrida inicializável; confira a ISO e o sistema selecionado".to_owned());
+fn validate_image_kind(path: &Path, kind: ImageKind) -> Result<(), String> {
+    if kind == ImageKind::Windows
+        && !path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                extension.eq_ignore_ascii_case("iso") || extension.eq_ignore_ascii_case("img")
+            })
+    {
+        return Err("para Windows, selecione uma ISO (.iso ou .img) descompactada com estrutura ISO9660/UDF; arquivos compactados são aceitos apenas no modo Linux".to_owned());
     }
     Ok(())
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -542,18 +859,89 @@ mod tests {
     use tempfile::{Builder, NamedTempFile};
 
     #[test]
-    fn rejects_non_hybrid_images_before_destructive_work() {
-        let mut iso = NamedTempFile::new().unwrap();
-        iso.write_all(&[0; 512]).unwrap();
-        assert!(super::validate_hybrid_image(iso.as_file_mut()).is_err());
-        let mut header = [0u8; 512];
-        header[510..].copy_from_slice(&[0x55, 0xaa]);
-        header[450] = 0x83;
-        header[458] = 1;
-        iso.seek(SeekFrom::Start(0)).unwrap();
-        iso.write_all(&header).unwrap();
-        super::validate_hybrid_image(iso.as_file_mut()).unwrap();
-        assert_eq!(iso.stream_position().unwrap(), 0);
+    fn cancellation_is_idempotent_and_does_not_leak_to_the_next_operation() {
+        let manager = super::FlashManager::default();
+        let first = manager.begin().unwrap();
+        assert!(manager.begin().is_err());
+        manager.cancel().unwrap();
+        manager.cancel().unwrap();
+        assert!(*first.borrow());
+        manager.finish();
+        assert!(!*manager.begin().unwrap().borrow());
+        manager.finish();
+        manager.cancel().unwrap();
+    }
+
+    #[test]
+    fn authenticates_control_and_cancels_on_disconnect_or_cancel() {
+        for disconnect in [true, false] {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let mut client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let (server, _) = listener.accept().unwrap();
+            let token = super::CancellationToken::default();
+            let monitored = token.clone();
+            let (sender, ready) = std::sync::mpsc::channel();
+            let thread =
+                thread::spawn(move || super::monitor_control(server, "secret", &monitored, sender));
+            client.write_all(b"{\"token\":\"wrong\",\"action\":\"cancel\"}\n{\"token\":\"secret\",\"action\":\"start\"}\n").unwrap();
+            ready
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap();
+            assert!(!token.is_cancelled());
+            if disconnect {
+                drop(client);
+            } else {
+                client
+                    .write_all(b"{\"token\":\"secret\",\"action\":\"cancel\"}\n")
+                    .unwrap();
+            }
+            thread.join().unwrap();
+            assert!(token.is_cancelled());
+        }
+    }
+
+    #[test]
+    fn queued_cancel_prevents_start_and_oversized_frames_abort() {
+        for frame in [
+            b"{\"token\":\"secret\",\"action\":\"cancel\"}\n".to_vec(),
+            vec![b'x'; 4097],
+        ] {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let mut client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let (server, _) = listener.accept().unwrap();
+            let token = super::CancellationToken::default();
+            let monitored = token.clone();
+            let (sender, ready) = std::sync::mpsc::channel();
+            let thread =
+                thread::spawn(move || super::monitor_control(server, "secret", &monitored, sender));
+            client.write_all(&frame).unwrap();
+            ready
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap();
+            thread.join().unwrap();
+            assert!(token.is_cancelled());
+        }
+    }
+
+    #[test]
+    fn windows_requires_uncompressed_iso_or_img() {
+        for path in ["windows.iso", "windows.IMG"] {
+            super::validate_image_kind(std::path::Path::new(path), ImageKind::Windows).unwrap();
+        }
+        for path in [
+            "windows.iso.gz",
+            "windows.xz",
+            "windows.zip",
+            "disk.raw",
+            "disk.bin",
+        ] {
+            assert!(
+                super::validate_image_kind(std::path::Path::new(path), ImageKind::Windows)
+                    .unwrap_err()
+                    .contains("ISO")
+            );
+            super::validate_image_kind(std::path::Path::new(path), ImageKind::Linux).unwrap();
+        }
     }
 
     #[test]
@@ -565,17 +953,25 @@ mod tests {
         source.write_all(&payload).unwrap();
         source.flush().unwrap();
         let mut target = NamedTempFile::new().unwrap();
-        target.as_file_mut().set_len((payload.len() as u64).div_ceil(512) * 512).unwrap();
+        target
+            .as_file_mut()
+            .set_len((payload.len() as u64).div_ceil(512) * 512)
+            .unwrap();
 
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let callback_port = listener.local_addr().unwrap().port();
         let reader = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .write_all(b"{\"token\":\"test-token\",\"action\":\"start\"}\n")
+                .unwrap();
             let mut messages = String::new();
             stream.read_to_string(&mut messages).unwrap();
             messages
         });
         let request = ElevatedFlashRequest {
+            operation_kind: super::OperationKind::Flash,
+            volume_label: None,
             operation_id: "test-operation".to_owned(),
             token: "test-token".to_owned(),
             callback_port,
@@ -589,13 +985,14 @@ mod tests {
             unattend_xml_content: None,
         };
         let mut reporter = Reporter::connect(&request).unwrap();
-        let source_file = source.reopen().unwrap();
+        let source_file =
+            super::ImageSource::open(source.path(), (payload.len() as u64).div_ceil(512) * 512)
+                .unwrap();
         let mut target_file = target.reopen().unwrap();
 
         write_image(
             source_file,
             &mut target_file,
-            payload.len() as u64,
             (512, (payload.len() as u64).div_ceil(512) * 512),
             &request.operation_id,
             &mut reporter,
@@ -614,7 +1011,12 @@ mod tests {
             .lines()
             .map(|line| serde_json::from_str::<HelperEnvelope>(line).unwrap())
             .collect::<Vec<_>>();
-        assert!(envelopes.iter().any(|event| event.progress.phase == FlashPhase::Verifying && event.progress.percentage == 100.0));
+        assert!(
+            envelopes
+                .iter()
+                .any(|event| event.progress.phase == FlashPhase::Verifying
+                    && event.progress.percentage == 100.0)
+        );
         assert!(envelopes.iter().any(|event| {
             event.progress.phase == FlashPhase::Writing && event.progress.percentage == 90.0
         }));
