@@ -1,0 +1,44 @@
+name: Finalizar publicacao da migracao
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  finalizar:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validar e publicar os instaladores existentes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GH_REPO" = "merakkicode/MERAKI-FLASH"
+          gh api "repos/$GH_REPO/releases/422362207" > placeholder.json
+          gh api "repos/$GH_REPO/releases/422368802" > completa.json
+          gh api "repos/$GH_REPO/contents/RELEASE_NOTES.md?ref=1.0.0" --jq .content | base64 --decode > notes.md
+          node <<'NODE'
+          const fs = require('fs');
+          const placeholder = JSON.parse(fs.readFileSync('placeholder.json', 'utf8'));
+          const release = JSON.parse(fs.readFileSync('completa.json', 'utf8'));
+          const expected = {
+            'Meraki.Flash-1.0.0-1.x86_64.rpm': ['4233658', 'sha256:b569646c742ceca23124dbd538907775d312989cb84171638df5f8674859b36e'],
+            'Meraki.Flash_1.0.0_amd64.AppImage': ['82328056', 'sha256:77adfece2cde8df13347279a3a116ff9be06da1c52710a3fdbffccdb34c67115'],
+            'Meraki.Flash_1.0.0_x64-setup.exe': ['2790749', 'sha256:749df2258153d43dceaae89942e43a9c829b37a36951a5d24275a841eed0ee15'],
+          };
+          if (placeholder.id !== 422362207 || placeholder.tag_name !== '1.0.0' || placeholder.assets.length !== 0) throw Error('Placeholder inesperado');
+          if (release.id !== 422368802 || release.tag_name !== '1.0.0' || release.assets.length !== 3) throw Error('Release inesperada');
+          for (const [name, [size, digest]] of Object.entries(expected)) {
+            const a = release.assets.find(a => a.name === name);
+            if (!a || String(a.size) !== size || a.digest !== digest || a.state !== 'uploaded') throw Error('Arquivo invalido: ' + name);
+          }
+          fs.writeFileSync('publish.json', JSON.stringify({
+            name: 'Meraki Flash 1.0.0', draft: false, prerelease: false, make_latest: 'true',
+            body: fs.readFileSync('notes.md', 'utf8')
+          }));
+          NODE
+          gh api --method PATCH "repos/$GH_REPO/releases/422362207" -F draft=true > placeholder-preservado.json
+          gh api --method PATCH "repos/$GH_REPO/releases/422368802" --input publish.json > publicado.json
+          gh api "repos/$GH_REPO/releases/latest" > latest.json
+          node -e "const r=require('./latest.json');if(r.id!==422368802||r.tag_name!=='1.0.0'||r.assets.length!==3)throw Error('Publicacao nao confirmada');console.log('Release 1.0.0 publicada com os tres instaladores verificados');"
