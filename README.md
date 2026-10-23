@@ -7,23 +7,23 @@
 <p align="center">Crie pendrives bootáveis do Windows e Linux, confira imagens e restaure dispositivos USB.</p>
 
 <p align="center">
-  <a href="https://github.com/lindnergui/MERAKI-FLASH/releases/latest"><img src="https://img.shields.io/github/v/release/lindnergui/MERAKI-FLASH?display_name=tag&amp;sort=semver&amp;style=for-the-badge" alt="Versão mais recente"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/lindnergui/MERAKI-FLASH?style=for-the-badge" alt="Licença MIT"></a>
+  <a href="https://github.com/merakkicode/MERAKI-FLASH/releases/latest"><img src="https://img.shields.io/github/v/release/merakkicode/MERAKI-FLASH?display_name=tag&amp;sort=date&amp;style=for-the-badge" alt="Versão mais recente"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/merakkicode/MERAKI-FLASH?style=for-the-badge" alt="Licença MIT"></a>
   <img src="https://img.shields.io/badge/plataformas-Windows%20%7C%20Linux-00bcd4?style=for-the-badge" alt="Windows e Linux">
-  <a href="https://github.com/lindnergui/MERAKI-FLASH/actions/workflows/release.yml"><img src="https://github.com/lindnergui/MERAKI-FLASH/actions/workflows/release.yml/badge.svg" alt="Verificação e publicação"></a>
+  <a href="https://github.com/merakkicode/MERAKI-FLASH/actions/workflows/release.yml"><img src="https://github.com/merakkicode/MERAKI-FLASH/actions/workflows/release.yml/badge.svg" alt="Verificação e publicação"></a>
 </p>
 
 Desenvolvido por **Guilherme Lindner**.
 
 ## Download
 
-Baixe a **v2.0.0** somente pelos [lançamentos oficiais](https://github.com/lindnergui/MERAKI-FLASH/releases/latest). Disponível para computadores x86-64.
+Baixe a **v1.0.0** somente pelos [lançamentos oficiais](https://github.com/merakkicode/MERAKI-FLASH/releases/latest). Disponível para computadores x86-64.
 
 | Sistema | Formato | Download |
 | --- | --- | --- |
-| Linux | AppImage portátil | [AppImage v2.0.0](https://github.com/lindnergui/MERAKI-FLASH/releases/download/v2.0.0/Meraki.Flash_2.0.0_amd64.AppImage) |
-| Linux | RPM para Fedora, RHEL, openSUSE e derivados | [RPM v2.0.0](https://github.com/lindnergui/MERAKI-FLASH/releases/download/v2.0.0/Meraki.Flash-2.0.0-1.x86_64.rpm) |
-| Windows 10/11 | Instalador EXE | [Instalador v2.0.0](https://github.com/lindnergui/MERAKI-FLASH/releases/download/v2.0.0/Meraki.Flash_2.0.0_x64-setup.exe) |
+| Linux | AppImage portátil | [AppImage v1.0.0](https://github.com/merakkicode/MERAKI-FLASH/releases/download/1.0.0/Meraki.Flash_1.0.0_amd64.AppImage) |
+| Linux | RPM para Fedora, RHEL, openSUSE e derivados | [RPM v1.0.0](https://github.com/merakkicode/MERAKI-FLASH/releases/download/1.0.0/Meraki.Flash-1.0.0-1.x86_64.rpm) |
+| Windows 10/11 | Instalador EXE | [Instalador v1.0.0](https://github.com/merakkicode/MERAKI-FLASH/releases/download/1.0.0/Meraki.Flash_1.0.0_x64-setup.exe) |
 
 Consulte as [notas da versão](RELEASE_NOTES.md).
 
@@ -52,7 +52,7 @@ No Windows, execute o instalador `Meraki.Flash_*_x64-setup.exe` e abra o aplicat
 > [!CAUTION]
 > Gravar ou restaurar um dispositivo apaga seus dados e partições. Confira o destino antes da confirmação. Uma operação cancelada pode deixar o dispositivo sem condições de inicialização; grave ou formate novamente antes de usá-lo.
 
-## Recursos da versão 2.0.0
+## Recursos da versão 1.0.0
 
 - Reconhecimento de pendrives e SSDs externos USB que reportam mídia fixa, preservando a exclusão de discos de sistema.
 - Gravação Linux de `.iso`, `.img`, `.raw` e `.bin`, além de descompressão em streaming de `.gz`, `.xz` e `.zip`.
@@ -125,7 +125,7 @@ O projeto usa Tauri 2, Rust, React 19, TypeScript e Tailwind CSS 4.
 Requer Node.js 22, Rust 1.95 ou mais recente e as dependências nativas do Tauri. No Linux, também são necessários compilador C, `make`, Autotools e `libclang` para compilar a wimlib incluída.
 
 ```bash
-git clone https://github.com/lindnergui/MERAKI-FLASH.git
+git clone https://github.com/merakkicode/MERAKI-FLASH.git
 cd MERAKI-FLASH
 npm ci
 npm run tauri dev
@@ -156,7 +156,7 @@ Os testes usam arquivos temporários e imagens sintéticas para validar MBR/FAT3
 
 ### Lançamentos
 
-O workflow [release.yml](.github/workflows/release.yml) testa Windows e Linux. Tags no formato `vX.Y.Z` devem corresponder à versão dos manifestos. A publicação exige testes, Clippy e os três instaladores: EXE, AppImage e RPM. A release permanece em rascunho enquanto os builds não terminam com sucesso.
+O workflow [release.yml](.github/workflows/release.yml) testa Windows e Linux. Tags no formato `X.Y.Z` ou `vX.Y.Z` devem corresponder à versão dos manifestos. A versão desta conta usa a tag `1.0.0`, preservando a tag histórica `v1.0.0` da conta de origem. A publicação exige testes, Clippy e os três instaladores: EXE, AppImage e RPM. A release permanece em rascunho enquanto os builds não terminam com sucesso.
 
 O aviso opcional de atualizações consulta a última release estável ao abrir, sem baixar nem instalar automaticamente. Pode ser desativado na interface. Usuários da v0.1.0 precisam instalar uma versão recente manualmente para obter esse aviso.
 

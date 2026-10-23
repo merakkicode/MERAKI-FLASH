@@ -1,11 +1,11 @@
 [package]
 name = "meraki-flash"
-version = "2.0.0"
+version = "1.0.0"
 description = "Crie pendrives bootáveis de Windows e Linux com segurança."
 authors = ["Guilherme Lindner"]
 license = "MIT"
-homepage = "https://github.com/lindnergui/MERAKI-FLASH"
-repository = "https://github.com/lindnergui/MERAKI-FLASH"
+homepage = "https://github.com/merakkicode/MERAKI-FLASH"
+repository = "https://github.com/merakkicode/MERAKI-FLASH"
 edition = "2024"
 rust-version = "1.95"
 

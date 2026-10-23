@@ -1,4 +1,4 @@
-export const RELEASES_URL = "https://github.com/lindnergui/MERAKI-FLASH/releases/latest";
+export const RELEASES_URL = "https://github.com/merakkicode/MERAKI-FLASH/releases/latest";
 export const UPDATE_PREFERENCE = "meraki-flash.check-updates";
 
 export function isNewerRelease(tag: string, current: string): boolean {
@@ -14,7 +14,7 @@ export function isNewerRelease(tag: string, current: string): boolean {
 }
 
 export async function latestUpdate(current: string, signal: AbortSignal): Promise<string | null> {
-  const response = await fetch("https://api.github.com/repos/lindnergui/MERAKI-FLASH/releases/latest", {
+  const response = await fetch("https://api.github.com/repos/merakkicode/MERAKI-FLASH/releases/latest", {
     signal, headers: { Accept: "application/vnd.github+json" },
     credentials: "omit", referrerPolicy: "no-referrer",
   });

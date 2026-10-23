@@ -5,6 +5,7 @@ import { isNewerRelease, latestUpdate } from "../src/lib/updates.ts";
 test("compara SemVer numericamente e ignora tags inválidas ou anteriores", () => {
   for (const [tag, current, expected] of [
     ["v1.0.0", "0.1.0", true], ["v1.0.0", "1.0.0", false],
+    ["1.0.0", "0.1.0", true], ["1.0.0", "1.0.0", false],
     ["v1.10.0", "1.9.0", true], ["v1.9.0", "1.10.0", false],
     ["v1.0.1", "1.0.0", true], ["v1.0.0-beta.1", "1.0.0", false],
     ["v1.0.0", "1.0.0-beta.1", true], ["v01.0.0", "1.0.0", false],

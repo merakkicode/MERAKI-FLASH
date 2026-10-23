@@ -27,7 +27,7 @@ export function UpdateNotice() {
         void invoke("open_releases_page").catch(() => setOpenError(true));
       }}>Ver atualização</button>
       <button type="button" aria-label="Fechar aviso de atualização" onClick={() => setVersion(null)}>Agora não</button>
-      {openError && <span className="w-full break-all">Abra github.com/lindnergui/MERAKI-FLASH/releases/latest no navegador.</span>}
+      {openError && <span className="w-full break-all">Abra github.com/merakkicode/MERAKI-FLASH/releases/latest no navegador.</span>}
     </div>}
     <label className="mb-4 flex items-center gap-2 self-end text-[11px] text-white/50">
       <input type="checkbox" checked={enabled} onChange={(event) => {

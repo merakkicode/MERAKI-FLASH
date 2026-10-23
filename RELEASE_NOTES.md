@@ -1,4 +1,4 @@
-# Meraki Flash v2.0.0
+# Meraki Flash v1.0.0
 
 Desenvolvido por **Guilherme Lindner**. Disponível para Windows 10/11 x64 (EXE) e Linux x86-64 (AppImage e RPM).
 
@@ -22,6 +22,6 @@ As configurações de instalação automatizada dependem da edição e versão d
 
 ## Instalação e atualização
 
-Baixe o instalador correspondente ao seu sistema nos arquivos desta release. Usuários de versões com aviso de atualização receberão a indicação da v2.0.0; a instalação continua manual. Quem usa a v0.1.0 deve baixar esta versão diretamente.
+Baixe o instalador correspondente ao seu sistema nos arquivos desta release. Esta versão inaugura a numeração 1.0.0 na conta merakkicode, mantendo todos os recursos existentes. A instalação continua manual; usuários de versões anteriores, inclusive v2.0.0 da conta de origem, devem baixar esta versão diretamente.
 
 Os testes automatizados usam arquivos temporários e dispositivos simulados; não substituem testes de inicialização em hardware físico. O instalador Windows permanece sem assinatura digital.

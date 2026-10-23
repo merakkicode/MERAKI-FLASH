@@ -1966,7 +1966,7 @@ dependencies = [
 
 [[package]]
 name = "meraki-flash"
-version = "2.0.0"
+version = "1.0.0"
 dependencies = [
  "base64 0.22.1",
  "fatfs",
@@ -1998,7 +1998,7 @@ dependencies = [
 
 [[package]]
 name = "meraki-flash-core"
-version = "2.0.0"
+version = "1.0.0"
 dependencies = [
  "serde",
  "serde_json",

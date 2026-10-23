@@ -1,4 +1,4 @@
-const RELEASES_URL: &str = "https://github.com/lindnergui/MERAKI-FLASH/releases/latest";
+const RELEASES_URL: &str = "https://github.com/merakkicode/MERAKI-FLASH/releases/latest";
 
 #[tauri::command]
 pub async fn open_releases_page() -> Result<(), String> {
